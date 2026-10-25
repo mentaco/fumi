@@ -9,7 +9,7 @@ cargo build --release --locked
 ./target/release/mdview --color never tests/fixtures/representative.md
 ```
 
-ビルドにはRust 1.88以上を指定しています。検証に使用したのはRust 1.92.0・macOS arm64です。実行時にRustや外部レンダラーは必要ありません。stdinとstdoutがTTYで、`TERM`が有効な対話端末から起動してください。
+ビルドにはRust 1.88以上を指定しています。検証に使用したのはRust 1.92.0 / 1.99.1・macOS arm64です。実行時にRustや外部レンダラーは必要ありません。stdinとstdoutがTTYで、`TERM`が有効な対話端末から起動してください。
 
 - `j` / `k`、上下矢印で1表示行ずつ移動します。
 - `Ctrl+d` / `Ctrl+u`で半画面、`Ctrl+f` / `Ctrl+b`・PageDown / PageUpで1画面移動します。

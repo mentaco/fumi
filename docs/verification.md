@@ -5,7 +5,7 @@
 ## 環境
 
 - macOS 27.0.1 / Build 26A434、Darwin 27.0.0、arm64。
-- Rust 1.92.0、Python 3.9.6。CPUの型番・物理メモリ量はsandbox内では取得できなかった。
+- Rust 1.92.0 / 1.99.1、Python 3.9.6。CPUの型番・物理メモリ量はsandbox内では取得できなかった。
 - PTYはPython標準ライブラリで作成。`TERM=xterm-256color`。シェル相当の監督プロセスを残してforeground process groupを設定し、ビューア終了後も同じ端末の属性を比較する。
 - 自動検証ではGUI端末・フォントは使用していない。Ghosttyでのユーザー手動確認は次節に記録する。Terminal.app / kitty / GNOME Terminal、tmux、SSH、Linuxの検証実績は未記録。
 
@@ -28,6 +28,20 @@
 
 これは上記環境でのユーザーの確認報告であり、エージェントが実端末で再実行した結果ではない。画面サイズ、フォントのサイズ・バージョン、tmux・SSHの有無、実施コマンドの詳細は未共有。チェックリスト内の個々の条件や、複数環境での検証を完了したとは扱わない。応答性についても新たな定量測定は報告されておらず、初回起動200 ms目標の未達は継続する。
 
+## 初回CIの失敗と修正（2026-10-25）
+
+[初回のGitHub Actions実行](https://github.com/mentaco/mdviewer/actions/runs/40165437830)は、Ubuntu・macOSともにfmtを通過し、Clippyで終了コード101となった。RustテストとPTY検証には進んでいない。macOSジョブ全体にはmatrixのfail-fastによるキャンセルも記録された。
+
+ユーザーが共有した詳細ログでは、ヘルプの位置表示に対して`clippy::manual_checked_ops`が警告されていた。従来のローカルRust 1.92.0では検出されなかったが、別の一時RUSTUP_HOMEとビルド出力先を使ったRust 1.99.1で同じ警告を再現した。
+
+- 本文とヘルプの位置計算を`checked_div(...).unwrap_or(100)`へ変更した。画面に収まる場合は100%、スクロール可能な場合は先頭0%・末尾100%という表示規則を維持する。
+- ヘルプが画面に収まる場合・スクロールする場合・リサイズ・本文へ戻る場合の進捗表示をテストへ追加した。Rust 1.92.0と1.99.1でfmt・Clippy・通常テスト17件が通過した。
+- Rust 1.99.1でビルドした実行ファイルとテスト実行ファイルを使い、macOSのPTY検証11グループ（故障注入を含む）も通過した。
+- checkout処理は初回CIでも成功しており、Node.js 20の非推奨警告は上記のClippy失敗と区別した。設定はNode.js 24を使用する`actions/checkout@v6`へ更新した（[公式説明](https://github.com/actions/checkout)）。
+- `fail-fast: false`で両OSの結果を最後まで収集し、Rust・Cargo・Clippyのバージョンもログへ残す設定を追加した。
+
+修正後のGitHub Actions再実行は未確認。ローカルでの新しいRustによる検証と、GitHub上での成功実績は区別する。
+
 ## 実行したチェック
 
 ```sh
@@ -39,7 +53,7 @@ rtk cargo build --release --locked
 rtk proxy python3 tests/pty_bench.py target/release/mdview
 ```
 
-Rustの通常テストは16件。加えて通常実行ではignoreされるPTY専用の故障注入テスト1件を、PTYスクリプトから3種類の故障条件で実行する。PTYスクリプトは11グループを検証する。GUI端末の目視確認を代替するものではない。
+Rustの通常テストは17件。加えて通常実行ではignoreされるPTY専用の故障注入テスト1件を、PTYスクリプトから3種類の故障条件で実行する。PTYスクリプトは11グループを検証する。GUI端末の目視確認を代替するものではない。
 
 ## 受け入れ条件との対応
 
@@ -53,7 +67,7 @@ Rustの通常テストは16件。加えて通常実行ではignoreされるPTY�
 | M06 | 段落・長いインラインコード・リンクの幅変更でソース位置を保持。最小サイズ未満からの復帰を確認 | 画面サイズ等の追加条件と、他端末での連続リサイズ |
 | M07 | q/Esc/Ctrl+c、SIGINT/SIGTERM、Ctrl+z/SIGTSTPとSIGCONT、初期化途中の出力失敗、panicをPTYで確認。raw/echo等の属性とカーソル表示・alternate screen離脱の出力を検証 | 他端末での画面・シェル復帰 |
 | M08 | 本文・ファイル名・引数エラー中のOSC52/CSI/ESC/NUL/C1を確認。ファイル種別、UTF-8、BOM・CRLF、容量上限・読込途中の上限、シンボリックリンクも確認 | 実機端末での安全な表示確認 |
-| M09 | macOS arm64のビルド・PTY検証を実施。macOS 27.0.1 / Ghostty 1.3.1 / RobotoMono Nerd Fontで上記6項目の手動確認が問題なしとのユーザー報告。macOS/LinuxのCI設定を追加 | CIはまだ実行していない。他の指定GUI端末・Linux・tmux・SSHの検証が必要 |
+| M09 | macOS arm64のビルド・PTY検証を実施。macOS 27.0.1 / Ghostty 1.3.1 / RobotoMono Nerd Fontで上記6項目の手動確認が問題なしとのユーザー報告。初回CIは両OSでClippyに失敗（上記参照） | 修正後CIの再実行、他の指定GUI端末・Linux・tmux・SSHの検証が必要 |
 
 端末属性の比較では、カーネルが一時的に立てる`PENDIN`（pending inputの再表示状態）だけを除く。macOSで、キー入力を読まずraw modeを解除する故障注入時にこの差が発生した。`ICANON`、`ECHO`、`ISIG`、速度、制御文字等の設定は比較する。スナップショットだけで端末復旧を判定していない。
 

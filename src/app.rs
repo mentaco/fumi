@@ -72,11 +72,7 @@ impl App {
         self.lines.len().saturating_sub(self.viewport())
     }
     pub fn percentage(&self) -> usize {
-        if self.max_top() == 0 {
-            100
-        } else {
-            100 * self.top / self.max_top()
-        }
+        (100 * self.top).checked_div(self.max_top()).unwrap_or(100)
     }
 
     pub fn resize(&mut self, width: u16, height: u16) {
@@ -220,11 +216,7 @@ impl App {
         let (position, pending) = if self.help {
             let max = self.help_lines.len().saturating_sub(self.viewport());
             (
-                if max == 0 {
-                    100
-                } else {
-                    100 * self.help_top / max
-                },
+                (100 * self.help_top).checked_div(max).unwrap_or(100),
                 self.help_pending_g,
             )
         } else {

@@ -227,6 +227,25 @@ fn scrolling_help_and_pending_g() {
 }
 
 #[test]
+fn help_percentage_handles_fitting_and_scrollable_content() {
+    let mut app = App::new(Document::parse(String::new()), "help.md", false);
+    app.resize(80, 100);
+    key(&mut app, KeyCode::Char('?'));
+    assert!(app.status().contains(" TEXT 100% HELP"));
+
+    app.resize(40, 10);
+    assert!(app.status().contains(" TEXT 0% HELP"));
+    key(&mut app, KeyCode::End);
+    assert!(app.status().contains(" TEXT 100% HELP"));
+    key(&mut app, KeyCode::Home);
+    assert!(app.status().contains(" TEXT 0% HELP"));
+
+    key(&mut app, KeyCode::Esc);
+    assert!(app.status().contains(" TEXT 100%"));
+    assert!(!app.help);
+}
+
+#[test]
 fn resize_keeps_source_and_small_mode_preserves_position() {
     let mut app = App::new(Document::parse("日本語abc".repeat(300)), "文書.md", false);
     app.resize(80, 12);
