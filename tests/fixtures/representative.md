@@ -1,0 +1,53 @@
+# 日本語のMarkdownビューア
+
+段落の **太字**、*強調*、~~打ち消し~~、`inline code` を読みます。
+soft breakの次の行です。  
+これはhard breakです。結合文字: é / が / 絵文字: 👩‍💻 🇯🇵 👨‍👩‍👧‍👦。
+
+見出し2
+-------
+
+> 引用の日本語が続きます。幅の狭い端末でも本文を切り捨てずに折り返します。
+>
+> > 二段目の引用です。
+
+- 箇条書きの長い文章を継続行の本文位置へ揃えます。
+  - ネストした項目
+  - [x] 完了済みタスク
+  - [ ] 未完了タスク
+
+9. 開始番号9
+10. 次は10
+
+```rust
+fn main() {
+	println!("日本語と $dollars$ と非常に長いコード行を折り返しても内容をすべて保持します");
+}
+```
+
+    indented $code$ **literal**
+
+[リンク](https://example.com/path) と <https://example.com>、[参照形式][ref]。
+
+[ref]: https://example.org/reference
+
+![日本語の図](./missing.png) ![](https://example.com/image.png)
+
+| 名前 | 用途 | |
+| --- | --- | --- |
+| **mdview** | 日本語のMarkdown閲覧 | |
+| 第二行 | 長い値はセル単位で折り返し内容を失わない | 値 |
+
+---
+
+<div onclick="alert('実行しない')">HTMLタグを文字として表示</div>
+
+数式: $x_i^2 + **literal**$、金額: $100 and $200、空白: $ x $、エスケープ: \$100。
+
+$$
+\frac{a_b}{c^2} + **TeXはMarkdownにしない**
+$$
+
+未閉鎖: $$ と $x は本文に残ります。
+
+https://example.com/averyveryveryveryveryverylongurlwithoutspaces0123456789

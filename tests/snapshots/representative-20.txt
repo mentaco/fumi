@@ -1,0 +1,98 @@
+# 日本語のMarkdownビ
+ューア
+
+段落の 太字、強調、
+打ち消し、inline
+code を読みます。
+soft
+breakの次の行です。
+これはhard
+breakです。結合文字:
+é / が / 絵文字: 👩‍💻
+🇯🇵 👨‍👩‍👧‍👦。
+
+## 見出し2
+
+│ 引用の日本語が続き
+│ ます。幅の狭い端末
+│ でも本文を切り捨て
+│ ずに折り返します。
+│ 
+│ │ 二段目の引用です
+│ │ 。
+
+• 箇条書きの長い文章
+  を継続行の本文位置
+  へ揃えます。
+  • ネストした項目
+  • [x]
+    完了済みタスク
+  • [ ] 未完了タスク
+
+9. 開始番号9
+10. 次は10
+
+[rust]
+fn main() {
+    println!("日本語
+↪ と $dollars$ と非
+↪ 常に長いコード行を
+↪ 折り返しても内容を
+↪ すべて保持します")
+↪ ;
+}
+
+indented $code$ **li
+↪ teral**
+
+リンク <https://exam
+ple.com/path> と htt
+ps://example.com、参
+照形式 <https://exam
+ple.org/reference>。
+
+[image: 日本語の図]
+<./missing.png>
+[image] <https://exa
+mple.com/image.png>
+
+[row 1]
+名前: mdview
+用途:
+日本語のMarkdown閲覧
+列3: (empty)
+
+[row 2]
+名前: 第二行
+用途: 長い値はセル単
+位で折り返し内容を失
+わない
+列3: 値
+
+────────────────────
+
+<div onclick="alert(
+'実行しない')">HTML
+タグを文字として表示
+</div>
+
+数式: $x_i^2 +
+**literal**$、金額:
+$100 and
+$200、空白: $ x
+$、エスケープ:
+$100。
+
+$$
+\frac{a_b}{c^2} + **
+↪ TeXはMarkdownにし
+↪ ない**
+$$
+
+未閉鎖: $$ と $x
+は本文に残ります。
+
+https://example.com/
+averyveryveryveryver
+yverylongurlwithouts
+paces0123456789
