@@ -40,7 +40,9 @@
 - checkout処理は初回CIでも成功しており、Node.js 20の非推奨警告は上記のClippy失敗と区別した。設定はNode.js 24を使用する`actions/checkout@v6`へ更新した（[公式説明](https://github.com/actions/checkout)）。
 - `fail-fast: false`で両OSの結果を最後まで収集し、Rust・Cargo・Clippyのバージョンもログへ残す設定を追加した。
 
-修正後のGitHub Actions再実行は未確認。ローカルでの新しいRustによる検証と、GitHub上での成功実績は区別する。
+修正コミット`01ad8c1`の[GitHub Actions再実行](https://github.com/mentaco/mdviewer/actions/runs/40167729404)では、`ubuntu-latest`・`macos-latest`の両ジョブでfmt・Clippy・Rustテスト・PTY検証がすべて成功した。2026-10-25（日本時間）にGitHub APIで各ステップの成功を確認した。
+
+これはGitHubホスト環境での自動・PTY検証の実績。ランナーのOSラベルは記録したが、OSイメージの詳細バージョンは未記録であり、LinuxのGUI端末・フォントの実機確認とは区別する。
 
 ## 実行したチェック
 
@@ -67,7 +69,7 @@ Rustの通常テストは17件。加えて通常実行ではignoreされるPTY�
 | M06 | 段落・長いインラインコード・リンクの幅変更でソース位置を保持。最小サイズ未満からの復帰を確認 | 画面サイズ等の追加条件と、他端末での連続リサイズ |
 | M07 | q/Esc/Ctrl+c、SIGINT/SIGTERM、Ctrl+z/SIGTSTPとSIGCONT、初期化途中の出力失敗、panicをPTYで確認。raw/echo等の属性とカーソル表示・alternate screen離脱の出力を検証 | 他端末での画面・シェル復帰 |
 | M08 | 本文・ファイル名・引数エラー中のOSC52/CSI/ESC/NUL/C1を確認。ファイル種別、UTF-8、BOM・CRLF、容量上限・読込途中の上限、シンボリックリンクも確認 | 実機端末での安全な表示確認 |
-| M09 | macOS arm64のビルド・PTY検証を実施。macOS 27.0.1 / Ghostty 1.3.1 / RobotoMono Nerd Fontで上記6項目の手動確認が問題なしとのユーザー報告。初回CIは両OSでClippyに失敗（上記参照） | 修正後CIの再実行、他の指定GUI端末・Linux・tmux・SSHの検証が必要 |
+| M09 | macOS arm64のビルド・PTY検証を実施。macOS 27.0.1 / Ghostty 1.3.1 / RobotoMono Nerd Fontで上記6項目の手動確認が問題なしとのユーザー報告。修正後CIではUbuntu・macOSともに全チェック成功（上記参照） | 他の指定GUI端末・Linux実端末・tmux・SSHの検証が必要 |
 
 端末属性の比較では、カーネルが一時的に立てる`PENDIN`（pending inputの再表示状態）だけを除く。macOSで、キー入力を読まずraw modeを解除する故障注入時にこの差が発生した。`ICANON`、`ECHO`、`ISIG`、速度、制御文字等の設定は比較する。スナップショットだけで端末復旧を判定していない。
 
