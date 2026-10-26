@@ -89,6 +89,10 @@ class Session:
                 os.environ.pop("NO_COLOR", None)
             else:
                 os.environ["NO_COLOR"] = no_color
+            # 実行元がtmux/screenでも、各ケースが指定した端末条件だけで検証する。
+            os.environ.pop("TMUX", None)
+            os.environ.pop("TMUX_PANE", None)
+            os.environ.pop("STY", None)
             if extra_env:
                 os.environ.update(extra_env)
             executable = binary or BINARY

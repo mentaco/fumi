@@ -137,7 +137,7 @@ pub fn run(
     crate::profile::mark("layout_ms");
     let mut decoder = crate::input::Decoder::default();
     let mut kitty = crate::graphics::Kitty::default();
-    let mut math = configure_graphics(&mut app, graphics, plain, colors, &mut decoder)?;
+    let mut math = configure_graphics(&mut app, graphics, plain, colors, &mut decoder, None)?;
     let mut dirty = true;
     let mut last_draw = Instant::now() - Duration::from_secs(1);
     loop {
@@ -151,7 +151,15 @@ pub fn run(
             if math.is_some() {
                 kitty.reset();
                 if !app.too_small() {
-                    math = configure_graphics(&mut app, graphics, plain, colors, &mut decoder)?;
+                    let previous = math.as_ref().map(|m| m.capabilities);
+                    math = configure_graphics(
+                        &mut app,
+                        graphics,
+                        plain,
+                        colors,
+                        &mut decoder,
+                        previous,
+                    )?;
                 }
             }
             dirty = true;
@@ -162,8 +170,17 @@ pub fn run(
         }
         if dirty && last_draw.elapsed() >= Duration::from_millis(16) {
             kitty.clear_placements(terminal.backend_mut())?;
-            terminal.draw(|f| app.draw(f))?;
-            if kitty.draw(&app, terminal.backend_mut()).is_err() {
+            let prepared = kitty.prepare(&app, terminal.backend_mut());
+            if prepared.is_ok() {
+                terminal.draw(|f| {
+                    app.draw(f);
+                    kitty.render_placeholders(&app, f);
+                })?;
+            }
+            if prepared
+                .and_then(|()| kitty.draw(&app, terminal.backend_mut()))
+                .is_err()
+            {
                 kitty.reset();
                 math = None;
                 app.graphics_active = false;
@@ -217,7 +234,7 @@ pub fn run(
             guard = Guard::enter()?;
             let size = terminal::size()?;
             app.resize(size.0, size.1);
-            math = configure_graphics(&mut app, graphics, plain, colors, &mut decoder)?;
+            math = configure_graphics(&mut app, graphics, plain, colors, &mut decoder, None)?;
             terminal.clear()?;
             dirty = true;
         }
@@ -230,6 +247,7 @@ fn configure_graphics(
     plain: bool,
     colors: bool,
     decoder: &mut crate::input::Decoder,
+    previous: Option<crate::graphics::Capabilities>,
 ) -> io::Result<Option<crate::math::Manager>> {
     if !app.document.nodes.iter().any(
         |node| matches!(&node.kind, crate::document::Kind::Math(s) if s.trim().starts_with("$$")),
@@ -238,7 +256,7 @@ fn configure_graphics(
         app.warning.clear();
         return Ok(None);
     }
-    match crate::graphics::query(graphics, plain, colors, decoder)? {
+    match crate::graphics::query(graphics, plain, colors, decoder, previous)? {
         Ok(capabilities) => {
             app.graphics_active = true;
             app.warning.clear();

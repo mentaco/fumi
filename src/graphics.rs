@@ -4,21 +4,114 @@ use crate::{
     math::Image,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
+use ratatui::{Frame, style::Color};
 use std::{
     collections::{HashMap, HashSet},
+    hash::BuildHasher,
     io::{self, Write},
+    process::{Command, Stdio},
     sync::{
-        Mutex,
+        Mutex, OnceLock,
         atomic::{AtomicU32, Ordering},
     },
     time::{Duration, Instant},
 };
 
+#[path = "graphics_diacritics.rs"]
+mod diacritics;
+pub const PLACEHOLDER_COLUMNS: usize = diacritics::DIACRITICS.len();
 const QUERY_ID: u32 = 4_000_000_001;
-static OWNED: Mutex<Vec<u32>> = Mutex::new(Vec::new());
-static NEXT_ID: AtomicU32 = AtomicU32::new(1_000_000);
+static OWNED: Mutex<Vec<(u32, Transport)>> = Mutex::new(Vec::new());
+static NEXT_ID: OnceLock<AtomicU32> = OnceLock::new();
+
+// ペイン間でのID衝突を避けるため、プロセスごとに開始値をランダム化する。
+fn next_id() -> u32 {
+    let ids = NEXT_ID.get_or_init(|| {
+        AtomicU32::new(
+            std::collections::hash_map::RandomState::new().hash_one(std::process::id()) as u32,
+        )
+    });
+    loop {
+        let id = ids.fetch_add(1, Ordering::Relaxed);
+        if id != 0 && id != QUERY_ID {
+            return id;
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Transport {
+    #[default]
+    Direct,
+    Tmux,
+}
+impl Transport {
+    fn detect() -> Self {
+        if std::env::var_os("TMUX").is_some() {
+            Self::Tmux
+        } else {
+            Self::Direct
+        }
+    }
+
+    // カーソル移動とプレースホルダーはラップしない。tmuxのペイン座標で扱う。
+    fn control(self, output: &mut impl Write, sequence: &str) -> io::Result<()> {
+        if self == Self::Tmux {
+            output.write_all(b"\x1bPtmux;")?;
+            for part in sequence.split_inclusive('\x1b') {
+                output.write_all(part.as_bytes())?;
+                if part.ends_with('\x1b') {
+                    output.write_all(b"\x1b")?;
+                }
+            }
+            output.write_all(b"\x1b\\")
+        } else {
+            output.write_all(sequence.as_bytes())
+        }
+    }
+}
+
+/// 起動元のペインだけを設定する。tmux.confやグローバル設定には触れない。
+fn enable_tmux_passthrough(deadline: Instant) -> Result<(), &'static str> {
+    let pane = std::env::var("TMUX_PANE").map_err(|_| "tmuxペインID不明")?;
+    if !pane
+        .strip_prefix('%')
+        .is_some_and(|id| !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return Err("tmuxペインID不正");
+    }
+    let mut child = Command::new("tmux")
+        .args(["set-option", "-p", "-t", &pane, "allow-passthrough", "all"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| "tmux自動設定コマンドを起動できません")?;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => return Ok(()),
+            Ok(Some(_)) => return Err("tmuxパススルー自動設定失敗"),
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(
+                    Duration::from_millis(2)
+                        .min(deadline.saturating_duration_since(Instant::now())),
+                );
+            }
+            result => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(if result.is_err() {
+                    "tmux自動設定の終了確認失敗"
+                } else {
+                    "tmux自動設定タイムアウト"
+                });
+            }
+        }
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Capabilities {
+    pub transport: Transport,
     pub cell: (u16, u16),
     pub background: [u8; 3],
     pub foreground: [u8; 3],
@@ -30,21 +123,54 @@ pub fn query(
     plain: bool,
     colors: bool,
     decoder: &mut Decoder,
+    previous: Option<Capabilities>,
 ) -> io::Result<Result<Capabilities, String>> {
     if plain || mode == GraphicsMode::Off {
         return Ok(Err("画像無効".into()));
     }
-    if std::env::var_os("TMUX").is_some() || std::env::var_os("STY").is_some() {
-        return Ok(Err("tmux/screenでは画像無効".into()));
+    if std::env::var_os("STY").is_some() {
+        return Ok(Err("screenでは画像無効".into()));
     }
+    let transport = Transport::detect();
     let mut output = io::stdout();
     let start = Instant::now();
-    write!(
-        output,
-        "\x1b_Gi={QUERY_ID},s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[16t\x1b[14t\x1b]11;?\x1b\\\x1b]10;?\x1b\\"
-    )?;
+    // tmuxは外側のAPC応答をアクティブなペインへ配送する。非アクティブな
+    // ペインのリサイズでは確認済みの対応状態を再利用し、寸法と色だけ更新する。
+    let mut supported =
+        transport == Transport::Tmux && previous.is_some_and(|c| c.transport == Transport::Tmux);
+    if transport == Transport::Tmux && !supported {
+        if let Err(reason) = enable_tmux_passthrough(start + Duration::from_millis(150)) {
+            return Ok(Err(reason.into()));
+        }
+        if start.elapsed() >= Duration::from_millis(150) {
+            return Ok(Err("tmux自動設定タイムアウト".into()));
+        }
+    }
+    let mut placeholders = transport != Transport::Tmux || supported;
+    let probe_id = if transport == Transport::Tmux && !supported {
+        Some(next_id())
+    } else {
+        None
+    };
+    if !supported {
+        transport.control(
+            &mut output,
+            &format!("\x1b_Gi={QUERY_ID},s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\"),
+        )?;
+    }
+    if let Some(id) = probe_id {
+        if let Ok(mut ids) = OWNED.lock() {
+            ids.push((id, transport));
+        }
+        // 透明な1ピクセルの仮想配置。実画像を送る前にU=1のエラーを確認する。
+        transport.control(
+            &mut output,
+            &format!("\x1b_Ga=T,U=1,i={id},s=1,v=1,c=1,r=1,t=d,f=32;AAAAAA==\x1b\\"),
+        )?;
+    }
+    // 寸法・色はtmux自身へ問い合わせる。外側端末の全画面寸法をペインへ流用しない。
+    output.write_all(b"\x1b[16t\x1b[14t\x1b]11;?\x1b\\\x1b]10;?\x1b\\")?;
     output.flush()?;
-    let mut supported = false;
     let mut background = None;
     let mut foreground = None;
     let mut cell = None;
@@ -62,6 +188,9 @@ pub fn query(
                 InputEvent::Reply(reply) => {
                     if kitty_reply(&reply).is_some_and(|(id, ok)| id == QUERY_ID && ok) {
                         supported = true;
+                    }
+                    if kitty_reply(&reply).is_some_and(|(id, ok)| Some(id) == probe_id && ok) {
+                        placeholders = true;
                     }
                     if let Some(value) = parse_color(&reply, 11) {
                         background = Some(value);
@@ -93,13 +222,30 @@ pub fn query(
                 }
             }
         }
-        if supported && cell.is_some() && background.is_some() && foreground.is_some() {
+        if supported
+            && placeholders
+            && cell.is_some()
+            && background.is_some()
+            && foreground.is_some()
+        {
             break;
         }
     }
     decoder.events.extend(users);
-    if mode == GraphicsMode::Auto && !supported {
-        return Ok(Err("画像非対応・照会無応答".into()));
+    if let Some(id) = probe_id {
+        release_image(id, transport, &mut output)?;
+        output.flush()?;
+    }
+    if !supported && (mode == GraphicsMode::Auto || transport == Transport::Tmux) {
+        return Ok(Err(if transport == Transport::Tmux {
+            "tmux画像照会無応答"
+        } else {
+            "画像非対応・照会無応答"
+        }
+        .into()));
+    }
+    if !placeholders {
+        return Ok(Err("tmux用Unicode画像配置に未対応・照会無応答".into()));
     }
     if cell.is_none()
         && let Ok(size) = crossterm::terminal::window_size()
@@ -135,6 +281,7 @@ pub fn query(
         };
     }
     Ok(Ok(Capabilities {
+        transport,
         cell,
         background,
         foreground,
@@ -177,21 +324,43 @@ pub fn kitty_reply(reply: &str) -> Option<(u32, bool)> {
 pub fn cleanup() {
     if let Ok(mut ids) = OWNED.lock() {
         let mut output = io::stdout();
-        for id in ids.drain(..) {
-            let _ = write!(output, "\x1b_Ga=d,d=I,i={id},q=2\x1b\\");
+        for (id, transport) in ids.drain(..) {
+            let _ = transport.control(&mut output, &format!("\x1b_Ga=d,d=I,i={id},q=2\x1b\\"));
         }
         let _ = output.flush();
     }
 }
-#[derive(Default)]
+
+fn release_image(id: u32, transport: Transport, output: &mut impl Write) -> io::Result<()> {
+    transport.control(output, &format!("\x1b_Ga=d,d=I,i={id},q=2\x1b\\"))?;
+    if let Ok(mut ids) = OWNED.lock() {
+        ids.retain(|(own, _)| *own != id);
+    }
+    Ok(())
+}
+
 pub struct Kitty {
+    transport: Transport,
     transferred: HashMap<usize, (u32, std::sync::Arc<Image>)>,
     placed: HashSet<u32>,
 }
+impl Default for Kitty {
+    fn default() -> Self {
+        Self::new(Transport::detect())
+    }
+}
 impl Kitty {
+    pub fn new(transport: Transport) -> Self {
+        Self {
+            transport,
+            transferred: HashMap::new(),
+            placed: HashSet::new(),
+        }
+    }
     pub fn clear_placements(&mut self, output: &mut impl Write) -> io::Result<()> {
         for id in self.placed.drain() {
-            write!(output, "\x1b_Ga=d,d=i,i={id},q=2\x1b\\")?;
+            self.transport
+                .control(output, &format!("\x1b_Ga=d,d=i,i={id},q=2\x1b\\"))?;
         }
         Ok(())
     }
@@ -200,13 +369,137 @@ impl Kitty {
         self.transferred.clear();
         self.placed.clear();
     }
+    fn release(&self, id: u32, output: &mut impl Write) -> io::Result<()> {
+        release_image(id, self.transport, output)
+    }
     pub fn has_error(&self, reply: &str) -> bool {
         kitty_reply(reply)
             .is_some_and(|(id, ok)| !ok && self.transferred.values().any(|(own, _)| *own == id))
     }
-    pub fn draw(&mut self, app: &crate::app::App, output: &mut impl Write) -> io::Result<()> {
+    /// 画像を先に転送する。Unicodeセルはratatuiの差分管理に含める。
+    pub fn prepare(&mut self, app: &crate::app::App, output: &mut impl Write) -> io::Result<()> {
         if app.help || app.too_small() || !app.graphics_active {
             self.reset();
+            return Ok(());
+        }
+        let mut visible = HashSet::new();
+        for line in app.lines.iter().skip(app.top).take(app.viewport()) {
+            let Some((source, _)) = line.image else {
+                continue;
+            };
+            if !visible.insert(source) {
+                continue;
+            }
+            let Some(crate::math::View::Ready(image)) = app.math_views.get(&source) else {
+                continue;
+            };
+            if self
+                .transferred
+                .get(&source)
+                .is_some_and(|(_, previous)| !std::sync::Arc::ptr_eq(previous, image))
+            {
+                let (id, _) = self.transferred.remove(&source).unwrap();
+                self.release(id, output)?;
+            }
+            if !self.transferred.contains_key(&source) {
+                let id = next_id();
+                if let Ok(mut ids) = OWNED.lock() {
+                    ids.push((id, self.transport));
+                }
+                let encoded = STANDARD.encode(&image.png);
+                // DCSのヘッダーとESCエスケープを含めても4096バイトを超えない。
+                let chunk_size = if self.transport == Transport::Tmux {
+                    3072
+                } else {
+                    4096
+                };
+                let count = encoded.len().div_ceil(chunk_size);
+                // tmuxでは失敗応答も他ペインへ入り得るため、初回照会後はquietにする。
+                let quiet = if self.transport == Transport::Tmux {
+                    2
+                } else {
+                    1
+                };
+                for (i, chunk) in encoded.as_bytes().chunks(chunk_size).enumerate() {
+                    let more = usize::from(i + 1 < count);
+                    let header = if i == 0 {
+                        format!("a=t,t=d,f=100,i={id},q={quiet},m={more}")
+                    } else {
+                        format!("m={more},q={quiet}")
+                    };
+                    // base64はASCIIなので変換は常に成立する。
+                    self.transport.control(
+                        output,
+                        &format!(
+                            "\x1b_G{header};{}\x1b\\",
+                            std::str::from_utf8(chunk).unwrap()
+                        ),
+                    )?;
+                }
+                if self.transport == Transport::Tmux {
+                    self.transport.control(
+                        output,
+                        &format!(
+                            "\x1b_Ga=p,U=1,i={id},p=1,c={},r={},C=1,q=2\x1b\\",
+                            image.columns, image.rows
+                        ),
+                    )?;
+                }
+                self.transferred.insert(source, (id, image.clone()));
+            }
+        }
+        let stale: Vec<_> = self
+            .transferred
+            .keys()
+            .filter(|source| !visible.contains(source))
+            .copied()
+            .collect();
+        for source in stale {
+            let (id, _) = self.transferred.remove(&source).unwrap();
+            self.release(id, output)?;
+        }
+        output.flush()
+    }
+    pub fn render_placeholders(&self, app: &crate::app::App, frame: &mut Frame) {
+        if self.transport != Transport::Tmux || app.help || app.too_small() || !app.graphics_active
+        {
+            return;
+        }
+        for (row, line) in app
+            .lines
+            .iter()
+            .skip(app.top)
+            .take(app.viewport())
+            .enumerate()
+        {
+            let Some((source, offset)) = line.image else {
+                continue;
+            };
+            let Some((id, image)) = self.transferred.get(&source) else {
+                continue;
+            };
+            let Some(&row_mark) = diacritics::DIACRITICS.get(offset) else {
+                continue;
+            };
+            let high = diacritics::DIACRITICS[(id >> 24) as usize];
+            let color = Color::Rgb((id >> 16) as u8, (id >> 8) as u8, *id as u8);
+            for (column, &column_mark) in diacritics::DIACRITICS
+                .iter()
+                .take(image.columns.min(app.body_width()))
+                .enumerate()
+            {
+                let symbol = format!("\u{10eeee}{row_mark}{column_mark}{high}");
+                let cell = &mut frame.buffer_mut()
+                    [(column as u16 + u16::from(app.width >= 40), row as u16)];
+                cell.reset();
+                cell.set_symbol(&symbol).set_fg(color);
+            }
+        }
+    }
+    /// 直接接続時だけ、本文描画後のカーソル座標へ画像を配置する。
+    pub fn draw(&mut self, app: &crate::app::App, output: &mut impl Write) -> io::Result<()> {
+        if self.transport == Transport::Tmux || app.help || app.too_small() || !app.graphics_active
+        {
             return Ok(());
         }
         let mut visible = HashSet::new();
@@ -223,41 +516,9 @@ impl Kitty {
             if !visible.insert(source) {
                 continue;
             }
-            let Some(crate::math::View::Ready(image)) = app.math_views.get(&source) else {
+            let Some((id, image)) = self.transferred.get(&source) else {
                 continue;
             };
-            if self
-                .transferred
-                .get(&source)
-                .is_some_and(|(_, previous)| !std::sync::Arc::ptr_eq(previous, image))
-            {
-                let (id, _) = self.transferred.remove(&source).unwrap();
-                write!(output, "\x1b_Ga=d,d=I,i={id},q=2\x1b\\")?;
-                if let Ok(mut ids) = OWNED.lock() {
-                    ids.retain(|i| *i != id);
-                }
-            }
-            if let std::collections::hash_map::Entry::Vacant(entry) = self.transferred.entry(source)
-            {
-                let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-                if let Ok(mut ids) = OWNED.lock() {
-                    ids.push(id);
-                }
-                let encoded = STANDARD.encode(&image.png);
-                let count = encoded.len().div_ceil(4096);
-                for (i, chunk) in encoded.as_bytes().chunks(4096).enumerate() {
-                    let more = usize::from(i + 1 < count);
-                    if i == 0 {
-                        write!(output, "\x1b_Ga=t,t=d,f=100,i={id},q=1,m={more};")?;
-                    } else {
-                        write!(output, "\x1b_Gm={more},q=1;")?;
-                    }
-                    output.write_all(chunk)?;
-                    output.write_all(b"\x1b\\")?;
-                }
-                entry.insert((id, image.clone()));
-            }
-            let id = self.transferred[&source].0;
             let remaining = image
                 .rows
                 .saturating_sub(offset)
@@ -265,30 +526,121 @@ impl Kitty {
             let cell_height = image.height as usize / image.rows;
             write!(
                 output,
-                "\x1b[{};{}H\x1b_Ga=p,i={id},p=1,x=0,y={},w={},h={},c={},r={},C=1,q=1\x1b\\",
+                "\x1b[{};{}H",
                 row - app.top + 1,
-                if app.width >= 40 { 2 } else { 1 },
-                offset * cell_height,
-                image.width,
-                remaining * cell_height,
-                image.columns,
-                remaining
+                if app.width >= 40 { 2 } else { 1 }
             )?;
-            self.placed.insert(id);
-        }
-        let stale: Vec<_> = self
-            .transferred
-            .keys()
-            .filter(|source| !visible.contains(source))
-            .copied()
-            .collect();
-        for source in stale {
-            let (id, _) = self.transferred.remove(&source).unwrap();
-            write!(output, "\x1b_Ga=d,d=I,i={id},q=2\x1b\\")?;
-            if let Ok(mut ids) = OWNED.lock() {
-                ids.retain(|i| *i != id);
-            }
+            self.transport.control(
+                output,
+                &format!(
+                    "\x1b_Ga=p,i={id},p=1,x=0,y={},w={},h={},c={},r={},C=1,q=1\x1b\\",
+                    offset * cell_height,
+                    image.width,
+                    remaining * cell_height,
+                    image.columns,
+                    remaining
+                ),
+            )?;
+            self.placed.insert(*id);
         }
         output.flush()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{app::App, document::Document, math::View};
+    use ratatui::{Terminal, backend::TestBackend};
+    use std::sync::Arc;
+
+    #[test]
+    fn tmux_passthrough_escapes_each_escape_and_keeps_commands_separate() {
+        let mut bytes = Vec::new();
+        for command in ["\x1b_Ga=t;AAAA\x1b\\", "\x1b_Ga=d,d=I,i=42\x1b\\"] {
+            Transport::Tmux.control(&mut bytes, command).unwrap();
+        }
+        assert_eq!(bytes, b"\x1bPtmux;\x1b\x1b_Ga=t;AAAA\x1b\x1b\\\x1b\\\x1bPtmux;\x1b\x1b_Ga=d,d=I,i=42\x1b\x1b\\\x1b\\");
+    }
+
+    #[test]
+    fn placeholder_cells_clip_at_both_edges_clear_on_help_and_return() {
+        let mut app = App::new(
+            Document::parse("before\n\n$$ x $$\n\nafter\n\n".repeat(10)),
+            "test.md",
+            true,
+        );
+        app.resize(40, 5);
+        app.graphics_active = true;
+        let source = app
+            .document
+            .nodes
+            .iter()
+            .find(|n| matches!(n.kind, crate::document::Kind::Math(_)))
+            .unwrap()
+            .source
+            .start;
+        let image = Arc::new(Image {
+            png: vec![],
+            width: 30,
+            height: 80,
+            columns: 3,
+            rows: 4,
+        });
+        app.set_math(HashMap::from([(source, View::Ready(image.clone()))]), "");
+        let start = app
+            .lines
+            .iter()
+            .position(|line| line.image == Some((source, 0)))
+            .unwrap();
+        let mut kitty = Kitty::new(Transport::Tmux);
+        // 全32bitのID（上位バイトも結合文字で保持）、列ごとに明示的な列番号。
+        kitty.transferred.insert(source, (0x02030405, image));
+        let mut terminal = Terminal::new(TestBackend::new(40, 5)).unwrap();
+        let draw = |terminal: &mut Terminal<TestBackend>, app: &App| {
+            terminal
+                .draw(|f| {
+                    app.draw(f);
+                    kitty.render_placeholders(app, f);
+                })
+                .unwrap()
+                .buffer
+                .clone()
+        };
+        app.top = start + 2;
+        let buffer = draw(&mut terminal, &app);
+        assert_eq!(
+            buffer[(1, 0)].symbol(),
+            "\u{10eeee}\u{030e}\u{0305}\u{030e}"
+        );
+        assert_eq!(
+            buffer[(2, 0)].symbol(),
+            "\u{10eeee}\u{030e}\u{030d}\u{030e}"
+        );
+        assert_eq!(buffer[(1, 0)].fg, Color::Rgb(3, 4, 5));
+        assert!(!buffer[(1, 2)].symbol().starts_with('\u{10eeee}'));
+        assert!(!buffer[(1, 4)].symbol().starts_with('\u{10eeee}'));
+        app.top = start - 2;
+        let buffer = draw(&mut terminal, &app);
+        assert_eq!(
+            buffer[(1, 2)].symbol(),
+            "\u{10eeee}\u{0305}\u{0305}\u{030e}"
+        );
+        assert!(!buffer[(1, 4)].symbol().starts_with('\u{10eeee}'));
+        app.help = true;
+        let buffer = draw(&mut terminal, &app);
+        assert!(
+            !buffer
+                .content
+                .iter()
+                .any(|c| c.symbol().starts_with('\u{10eeee}'))
+        );
+        app.help = false;
+        draw(&mut terminal, &app);
+        assert!(
+            terminal.backend().buffer()[(1, 2)]
+                .symbol()
+                .starts_with('\u{10eeee}')
+        );
     }
 }

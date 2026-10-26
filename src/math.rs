@@ -256,7 +256,11 @@ impl Manager {
     fn key(&self, tex: &str, width: usize) -> Request {
         Request {
             tex: tex.into(),
-            width,
+            width: if self.capabilities.transport == crate::graphics::Transport::Tmux {
+                width.min(crate::graphics::PLACEHOLDER_COLUMNS)
+            } else {
+                width
+            },
             cell: self.capabilities.cell,
             background: self.capabilities.background,
             foreground: self.capabilities.foreground,
@@ -436,6 +440,7 @@ mod tests {
     use super::*;
     fn capabilities() -> crate::graphics::Capabilities {
         crate::graphics::Capabilities {
+            transport: crate::graphics::Transport::Direct,
             cell: (10, 20),
             background: [0; 3],
             foreground: [255; 3],
