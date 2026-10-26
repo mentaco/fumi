@@ -74,6 +74,14 @@ RaTeXのコードはMIT、KaTeX TTFはSIL OFL 1.1。[フォント出典](../lice
 
 2026-10-26の変更では、fmt・Clippy・Rustテスト39件が成功（PTY専用1件は通常テストではignore）。表の出力・セル幅・狭幅への切替・生成ラベルの検索除外の回帰テストと、丸括弧・角括弧付き行列のPNG生成を確認した。画像の目視確認はPNG単体であり、実端末での再描画確認と区別する。
 
+## v1のCI警告への対応（2026-10-26）
+
+v1コミット`54d1f65`の[GitHub Actions](https://github.com/mentaco/mdviewer/actions/runs/40283381775)はmacOS・UbuntuともClippyで終了した。ユーザーが共有したログでは、色なし数式PNGのテストの`chunks_exact(4)`に対し、Rust 1.99系の`clippy::chunks_exact_to_as_chunks`が警告され、`-D warnings`により失敗していた。
+
+- RGBAの検査を`as_chunks::<4>()`で型が`[u8; 4]`のピクセル単位へ分割する形に変更した。全ピクセルのRGBが等しいことの検査を維持し、4バイト未満の余りがないことも明示的に検査する。
+- [Clippyの公式説明](https://clippy.rust-lang.org/rust-1.99.0/index.html#chunks_exact_to_as_chunks)に従った変更で、`as_chunks`はRust 1.88から利用できるため、manifestの最小Rustバージョンの引き上げは不要。
+- ローカルのRust 1.92.0で対象テスト・全target／全featureのClippy・Rustテスト39件・fmtが成功した。実行中の製品コードや依存関係は変更していない。Rust 1.99系での成否は修正後のCI結果として別途確認する。
+
 ## 性能
 
 release＋startup-profile、1 MiB・1万行、120×40、移動100回、検索語`line`（1万件）、80×24へリサイズ。各条件3回。全試行・fixtureと測定バイナリのSHA-256は[生データ](performance/2026-10-25-v1.json)に保存した。表はmsで、再実行系列の中央値。移動は各run内p95の中央値。実端末の描画時間やLinuxの性能は含めない。

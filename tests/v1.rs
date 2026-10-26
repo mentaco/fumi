@@ -374,9 +374,14 @@ fn color_never_removes_tex_color_commands_from_the_resulting_pixels() {
         .unwrap();
     let mut bytes = vec![0; reader.output_buffer_size()];
     let info = reader.next_frame(&mut bytes).unwrap();
+    let (pixels, remainder) = bytes[..info.buffer_size()].as_chunks::<4>();
     assert!(
-        bytes[..info.buffer_size()]
-            .chunks_exact(4)
+        remainder.is_empty(),
+        "RGBA画像のバイト数は4の倍数であること"
+    );
+    assert!(
+        pixels
+            .iter()
             .all(|pixel| pixel[0] == pixel[1] && pixel[1] == pixel[2])
     );
 }
