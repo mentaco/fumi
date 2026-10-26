@@ -33,9 +33,9 @@ def terminal_settings(attributes):
 
 
 class Session:
-    def __init__(self, args, term="xterm-256color", stdin_tty=True, stdout_tty=True, stderr_tty=True, no_color=None, binary=None, extra_env=None):
+    def __init__(self, args, term="xterm-256color", stdin_tty=True, stdout_tty=True, stderr_tty=True, no_color=None, binary=None, extra_env=None, size=(80, 24), exec_clock_env=None):
         self.master, self.slave = os.openpty()
-        self.resize(80, 24)
+        self.resize(*size)
         self.before = termios.tcgetattr(self.slave)
         self.data = bytearray()
         status_read, status_write = os.pipe()
@@ -92,6 +92,8 @@ class Session:
             if extra_env:
                 os.environ.update(extra_env)
             executable = binary or BINARY
+            if exec_clock_env:
+                os.environ[exec_clock_env] = str(time.clock_gettime_ns(time.CLOCK_MONOTONIC))
             os.execv(executable, [executable] + [str(arg) for arg in args])
         os.close(status_write)
         os.close(keepalive_read)
@@ -199,7 +201,8 @@ def interaction():
         session.send(b"q")
         session.wait(0)
         assert b"\x1b[?1049l" in session.data and b"\x1b[?25h" in session.data
-        assert b"\x1b_G" not in session.data and b"\x1b[?1000h" not in session.data
+        assert b"\x1b[?1000l" in session.data and b"\x1b[?1006l" in session.data
+        assert b"\x1b_G" not in session.data and b"\x1b[?1000h" in session.data
         assert hashlib.sha256(FIXTURE.read_bytes()).hexdigest() == before
     finally:
         session.close()
@@ -215,6 +218,7 @@ def exit_path(key=None, sig=None, code=0):
             os.kill(session.pid, sig)
         session.wait(code)
         assert b"\x1b[?1049l" in session.data and b"\x1b[?25h" in session.data
+        assert b"\x1b[?1000l" in session.data and b"\x1b[?1006l" in session.data
     finally:
         session.close()
 
@@ -308,7 +312,7 @@ def color_modes():
 
 def restoration_faults():
     # cargo testで作成されたlibテスト実行ファイルを選ぶ。
-    for candidate in Path(BINARY).parent.joinpath("deps").glob("mdview-*"):
+    for candidate in sorted(Path(BINARY).parent.joinpath("deps").glob("mdview-*"), key=lambda path: path.stat().st_mtime, reverse=True):
         if not candidate.is_file() or not os.access(candidate, os.X_OK):
             continue
         listed = subprocess.run([str(candidate), "--list"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)

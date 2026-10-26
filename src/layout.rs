@@ -2,12 +2,12 @@ use crate::{
     document::{Document, Kind, Node},
     source::sanitize,
 };
-use pulldown_cmark::{CodeBlockKind, Tag};
+use pulldown_cmark::{Alignment, CodeBlockKind, Tag};
 use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
 };
-use std::ops::Range;
+use std::{borrow::Cow, ops::Range};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -16,22 +16,27 @@ pub struct Run {
     pub text: String,
     pub style: Style,
     pub source: Range<usize>,
+    pub destination: bool,
 }
 
 #[derive(Default, Debug)]
-struct LogicalLine {
+pub(crate) struct LogicalLine {
     runs: Vec<Run>,
     prefix: String,
     continuation: String,
     code: bool,
     rule: bool,
     source: usize,
+    language: Option<String>,
 }
 
 #[derive(Clone, Debug)]
 pub struct DisplayLine {
     pub line: Line<'static>,
     pub source: Range<usize>,
+    pub mappings: Vec<(Range<usize>, Range<usize>)>,
+    pub image: Option<(usize, usize)>,
+    pub destinations: Vec<(Range<usize>, usize, Range<usize>)>,
 }
 
 impl DisplayLine {
@@ -41,11 +46,13 @@ impl DisplayLine {
 }
 
 #[derive(Clone, Debug)]
-struct Cell {
-    text: String,
+struct Cell<'a> {
+    text: Cow<'a, str>,
     style: Style,
     source: Range<usize>,
     width: usize,
+    destination: Option<(usize, Range<usize>)>,
+    offset: usize,
 }
 
 fn run(text: impl Into<String>, style: Style, range: Range<usize>) -> Run {
@@ -53,6 +60,7 @@ fn run(text: impl Into<String>, style: Style, range: Range<usize>) -> Run {
         text: text.into(),
         style,
         source: range,
+        destination: false,
     }
 }
 
@@ -89,7 +97,9 @@ fn inline(nodes: &[Node], style: Style, out: &mut Vec<Run>) {
                     out.extend(label);
                     if !same {
                         out.push(run(" <", style, r.start..r.start));
-                        out.push(run(dest_url.to_string(), style, r.clone()));
+                        let mut destination = run(dest_url.to_string(), style, r.clone());
+                        destination.destination = true;
+                        out.push(destination);
                         out.push(run(">", style, r.end..r.end));
                     }
                 }
@@ -104,7 +114,9 @@ fn inline(nodes: &[Node], style: Style, out: &mut Vec<Run>) {
                     ));
                     out.extend(alt);
                     out.push(run("] <", style, r.start..r.start));
-                    out.push(run(dest_url.to_string(), style, r.clone()));
+                    let mut destination = run(dest_url.to_string(), style, r.clone());
+                    destination.destination = true;
+                    out.push(destination);
                     out.push(run(">", style, r.end..r.end));
                 }
                 _ => inline(&node.children, style, out),
@@ -139,7 +151,7 @@ fn blank(lines: &mut Vec<LogicalLine>, source: usize) {
     }
 }
 
-fn sequence(nodes: &[Node], gaps: bool) -> Vec<LogicalLine> {
+fn sequence(nodes: &[Node], gaps: bool, width: usize) -> Vec<LogicalLine> {
     let mut lines = Vec::new();
     let mut i = 0;
     while i < nodes.len() {
@@ -148,7 +160,7 @@ fn sequence(nodes: &[Node], gaps: bool) -> Vec<LogicalLine> {
             blank(&mut lines, node.source.start);
         }
         if is_block(node) {
-            lines.extend(block(node));
+            lines.extend(block(node, width));
             i += 1;
         } else {
             let start = i;
@@ -167,7 +179,7 @@ fn sequence(nodes: &[Node], gaps: bool) -> Vec<LogicalLine> {
     lines
 }
 
-fn block(node: &Node) -> Vec<LogicalLine> {
+fn block(node: &Node, width: usize) -> Vec<LogicalLine> {
     let base = || LogicalLine {
         source: node.source.start,
         ..Default::default()
@@ -200,7 +212,7 @@ fn block(node: &Node) -> Vec<LogicalLine> {
             vec![LogicalLine { runs, ..base() }]
         }
         Kind::Element(Tag::BlockQuote(_)) => {
-            let mut lines = sequence(&node.children, true);
+            let mut lines = sequence(&node.children, true, width.saturating_sub(2));
             for line in &mut lines {
                 line.prefix.insert_str(0, "│ ");
                 line.continuation.insert_str(0, "│ ");
@@ -222,7 +234,8 @@ fn block(node: &Node) -> Vec<LogicalLine> {
                 if loose {
                     blank(&mut lines, item.source.start);
                 }
-                let mut contents = sequence(&item.children, loose);
+                let mut contents =
+                    sequence(&item.children, loose, width.saturating_sub(marker.width()));
                 if contents.is_empty() {
                     contents.push(LogicalLine {
                         source: item.source.start,
@@ -263,13 +276,171 @@ fn block(node: &Node) -> Vec<LogicalLine> {
             lines.push(LogicalLine {
                 runs,
                 code: true,
+                language: match kind {
+                    CodeBlockKind::Fenced(language) if !language.is_empty() => {
+                        Some(language.to_string())
+                    }
+                    _ => None,
+                },
                 ..base()
             });
             lines
         }
-        Kind::Element(Tag::Table(_)) => table(node),
-        _ => sequence(&node.children, true),
+        Kind::Element(Tag::Table(_)) if width == 0 => node
+            .children
+            .iter()
+            .flat_map(|row| row.children.iter())
+            .map(|cell| {
+                let mut runs = Vec::new();
+                inline(&cell.children, Style::default(), &mut runs);
+                LogicalLine {
+                    runs,
+                    source: cell.source.start,
+                    ..Default::default()
+                }
+            })
+            .collect(),
+        Kind::Element(Tag::Table(alignments)) => {
+            grid_table(node, alignments, width).unwrap_or_else(|| table(node))
+        }
+        _ => sequence(&node.children, true, width.saturating_sub(2)),
     }
+}
+
+fn grid_table(node: &Node, alignments: &[Alignment], width: usize) -> Option<Vec<LogicalLine>> {
+    let mut rows: Vec<Vec<Vec<Run>>> = Vec::new();
+    let mut sources = Vec::new();
+    for row in &node.children {
+        if !matches!(row.kind, Kind::Element(Tag::TableHead | Tag::TableRow)) {
+            continue;
+        }
+        let header = rows.is_empty();
+        let mut cells = Vec::new();
+        for (i, cell) in row.children.iter().enumerate() {
+            let mut runs = Vec::new();
+            inline(
+                &cell.children,
+                if header {
+                    Style::default().add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                },
+                &mut runs,
+            );
+            if runs.iter().all(|r| r.text.trim().is_empty()) {
+                runs = vec![run(
+                    if header {
+                        format!("(列{})", i + 1)
+                    } else {
+                        "(empty)".into()
+                    },
+                    Style::default(),
+                    cell.source.start..cell.source.start,
+                )];
+            }
+            cells.push(runs);
+        }
+        rows.push(cells);
+        sources.push(row.source.start);
+    }
+    let count = alignments.len();
+    let mut widths = vec![0; count];
+    for row in &rows {
+        for (i, cell) in row.iter().enumerate().take(count) {
+            let text: String = cell.iter().map(|r| sanitize(&r.text)).collect();
+            if text.contains('\n') || text.contains('\t') {
+                return None;
+            }
+            widths[i] = widths[i].max(text.width());
+        }
+    }
+    let no_row = "(no row)";
+    if rows.len() == 1 {
+        // 空表のメッセージにも左右1セルを確保し、セルを結合した本文行へ収める。
+        let natural = widths.iter().sum::<usize>() + 3 * count + 1;
+        let extra = (no_row.width() + 4).saturating_sub(natural);
+        for (i, column) in widths.iter_mut().enumerate() {
+            *column += extra / count + usize::from(i < extra % count);
+        }
+    }
+    let table_width = widths.iter().sum::<usize>() + 3 * count + 1;
+    if table_width > width {
+        return None;
+    }
+    let border = |left: &str, middle: &str, right: &str, source: usize| LogicalLine {
+        runs: vec![run(
+            format!(
+                "{left}{}{right}",
+                widths
+                    .iter()
+                    .map(|w| "─".repeat(w + 2))
+                    .collect::<Vec<_>>()
+                    .join(middle)
+            ),
+            Style::default(),
+            source..source,
+        )],
+        source,
+        ..Default::default()
+    };
+    let mut result = vec![border("┌", "┬", "┐", node.source.start)];
+    for (row_index, row) in rows.iter().enumerate() {
+        let source = sources[row_index];
+        let mut runs = vec![run("│", Style::default(), source..source)];
+        for (i, cell) in row.iter().enumerate().take(count) {
+            let text: String = cell.iter().map(|r| sanitize(&r.text)).collect();
+            let extra = widths[i].saturating_sub(text.width());
+            let left = match alignments[i] {
+                Alignment::Right => extra,
+                Alignment::Center => extra / 2,
+                _ => 0,
+            };
+            runs.push(run(" ".repeat(1 + left), Style::default(), source..source));
+            runs.extend(cell.clone());
+            runs.push(run(
+                format!("{}│", " ".repeat(1 + extra - left)),
+                Style::default(),
+                source..source,
+            ));
+        }
+        result.push(LogicalLine {
+            runs,
+            source,
+            ..Default::default()
+        });
+        if row_index == 0 {
+            result.push(border(
+                "├",
+                if rows.len() == 1 { "┴" } else { "┼" },
+                "┤",
+                source,
+            ));
+        }
+    }
+    if rows.len() == 1 {
+        let remaining = table_width - 2 - no_row.width();
+        let left = remaining / 2;
+        result.push(LogicalLine {
+            runs: vec![run(
+                format!(
+                    "│{}{no_row}{}│",
+                    " ".repeat(left),
+                    " ".repeat(remaining - left)
+                ),
+                Style::default(),
+                node.source.start..node.source.start,
+            )],
+            source: node.source.start,
+            ..Default::default()
+        });
+    }
+    result.push(border(
+        "└",
+        if rows.len() == 1 { "─" } else { "┴" },
+        "┘",
+        node.source.end,
+    ));
+    Some(result)
 }
 
 fn table(node: &Node) -> Vec<LogicalLine> {
@@ -286,7 +457,7 @@ fn table(node: &Node) -> Vec<LogicalLine> {
                 );
                 if runs.iter().all(|r| r.text.trim().is_empty()) {
                     runs = vec![run(
-                        format!("列{}", idx + 1),
+                        format!("(列{})", idx + 1),
                         Style::default(),
                         cell.source.clone(),
                     )];
@@ -307,7 +478,7 @@ fn table(node: &Node) -> Vec<LogicalLine> {
             });
         }
         result.push(LogicalLine {
-            runs: vec![run("(no rows)", Style::default(), node.source.clone())],
+            runs: vec![run("(no row)", Style::default(), node.source.clone())],
             source: node.source.start,
             ..Default::default()
         });
@@ -350,7 +521,12 @@ fn table(node: &Node) -> Vec<LogicalLine> {
     result
 }
 
-fn cells(line: &LogicalLine, document: &Document, colors: bool) -> Vec<Cell> {
+fn cells<'a>(
+    line: &LogicalLine,
+    document: &Document,
+    colors: bool,
+    rendered: &'a str,
+) -> Vec<Cell<'a>> {
     struct Mapping<'a> {
         run: &'a Run,
         start: usize,
@@ -359,19 +535,19 @@ fn cells(line: &LogicalLine, document: &Document, colors: bool) -> Vec<Cell> {
         content_start: Option<usize>,
         cursor: usize,
     }
-    let mut rendered = String::new();
     let mut mappings = Vec::new();
+    let mut offset = 0;
     for run in &line.runs {
         if run.text.is_empty() {
             continue;
         }
-        let start = rendered.len();
-        rendered.push_str(&run.text);
+        let start = offset;
+        offset += run.text.len();
         let raw = document.source.get(run.source.clone()).unwrap_or("");
         mappings.push(Mapping {
             run,
             start,
-            end: rendered.len(),
+            end: offset,
             raw,
             content_start: raw.find(run.text.as_str()),
             cursor: 0,
@@ -379,8 +555,12 @@ fn cells(line: &LogicalLine, document: &Document, colors: bool) -> Vec<Cell> {
     }
     let mut result = Vec::new();
     let mut column = 0;
+    let mut first = 0;
     for (offset, g) in rendered.grapheme_indices(true) {
-        let first = mappings.partition_point(|m| m.end <= offset);
+        // 書記素とrunは両方とも先頭から順に進む。毎回の二分探索は不要。
+        while mappings[first].end <= offset {
+            first += 1;
+        }
         let mut style = mappings[first].run.style;
         if !colors {
             style.fg = None;
@@ -394,12 +574,16 @@ fn cells(line: &LogicalLine, document: &Document, colors: bool) -> Vec<Cell> {
             let local = offset.saturating_sub(m.start);
             let end = (offset + g.len()).min(m.end) - m.start;
             let part = &m.run.text[local..end];
-            let range = if let Some(start) = m.content_start {
+            let range = if m.run.destination && m.content_start.is_none() {
+                m.run.source.end.saturating_sub(1)..m.run.source.end
+            } else if let Some(start) = m.content_start {
                 m.run.source.start + start + local..m.run.source.start + start + end
             } else if let Some(start) = m.raw[m.cursor..].find(part) {
                 let begin = m.cursor + start;
                 m.cursor = begin + part.len();
                 m.run.source.start + begin..m.run.source.start + m.cursor
+            } else if part == " " && m.raw.chars().all(char::is_whitespace) {
+                m.run.source.clone()
             } else if m.raw[m.cursor..].starts_with('&')
                 && let Some(end) = m.raw[m.cursor..].find(';')
             {
@@ -407,7 +591,7 @@ fn cells(line: &LogicalLine, document: &Document, colors: bool) -> Vec<Cell> {
                 m.cursor += end + 1;
                 m.run.source.start + begin..m.run.source.start + m.cursor
             } else {
-                m.run.source.start..m.run.source.start
+                m.run.source.clone()
             };
             if let Some(source) = &mut source {
                 source.end = source.end.max(range.end);
@@ -422,22 +606,34 @@ fn cells(line: &LogicalLine, document: &Document, colors: bool) -> Vec<Cell> {
                 style,
                 source,
                 width: 0,
+                destination: None,
+                offset,
             });
             column = 0;
             continue;
         }
         let text = if g == "\t" {
-            " ".repeat(4 - column % 4)
+            Cow::Owned(" ".repeat(4 - column % 4))
+        } else if g.chars().any(char::is_control) {
+            Cow::Owned(sanitize(g))
         } else {
-            sanitize(g)
+            Cow::Borrowed(g)
         };
         let width = text.width();
         column += width;
+        let destination = mappings[first].run.destination.then(|| {
+            (
+                mappings[first].run.source.start,
+                offset - mappings[first].start..offset - mappings[first].start + g.len(),
+            )
+        });
         result.push(Cell {
             text,
             style,
             source,
             width,
+            destination,
+            offset,
         });
     }
     result
@@ -447,7 +643,7 @@ pub fn layout(document: &Document, width: usize, colors: bool) -> Vec<DisplayLin
     if width == 0 {
         return Vec::new();
     }
-    let mut logical = sequence(&document.nodes, true);
+    let mut logical = sequence(&document.nodes, true, width);
     if logical.is_empty() {
         logical.push(LogicalLine {
             runs: vec![run("(empty)", Style::default(), 0..0)],
@@ -465,10 +661,31 @@ pub fn layout(document: &Document, width: usize, colors: bool) -> Vec<DisplayLin
             result.push(DisplayLine {
                 line: Line::raw(format!("{prefix}{}", "─".repeat(width - prefix.width()))),
                 source: line.source..line.source,
+                mappings: Vec::new(),
+                image: None,
+                destinations: Vec::new(),
             });
             continue;
         }
-        let data = cells(&line, document, colors);
+        // 装飾境界をまたぐ書記素を維持し、通常文字のCellはこの文字列を借用する。
+        let rendered: String = line.runs.iter().map(|r| r.text.as_str()).collect();
+        let mut data = cells(&line, document, colors, &rendered);
+        // ソース対応を作ってから装飾だけを重ねる。引用・字下げでコードの元位置が飛んでも対応を壊さない。
+        if colors && let Some(language) = &line.language {
+            let tokens = crate::highlight::highlight(
+                vec![run(&rendered, Style::default(), 0..rendered.len())],
+                language,
+            );
+            let mut token = 0;
+            for cell in &mut data {
+                while token + 1 < tokens.len() && tokens[token].source.end <= cell.offset {
+                    token += 1;
+                }
+                if let Some(highlight) = tokens.get(token) {
+                    cell.style = highlight.style;
+                }
+            }
+        }
         let mut start = 0;
         let mut first = true;
         let mut code_continuation = false;
@@ -532,21 +749,38 @@ pub fn layout(document: &Document, width: usize, colors: bool) -> Vec<DisplayLin
                 || data.last().map_or(line.source, |c| c.source.end),
                 |c| c.source.start,
             );
-            let source_end = data
-                .get(next.saturating_sub(1))
-                .map_or(source_start, |c| c.source.end);
+            let source_end = data[start..next]
+                .iter()
+                .map(|c| c.source.end)
+                .max()
+                .unwrap_or(source_start);
+            let mut byte_offset = prefix.len();
+            let mut mappings = Vec::new();
+            let mut destinations = Vec::new();
             let mut spans = vec![Span::raw(prefix)];
             for c in &data[start..end] {
+                mappings.push((byte_offset..byte_offset + c.text.len(), c.source.clone()));
+                if let Some((id, range)) = &c.destination {
+                    destinations.push((
+                        byte_offset..byte_offset + c.text.len(),
+                        *id,
+                        range.clone(),
+                    ));
+                }
+                byte_offset += c.text.len();
                 // 通常の最小幅20以上では書記素は収まる。単独書記素が超過した場合も破壊しない。
                 if let Some(last) = spans.last_mut().filter(|s| s.style == c.style) {
                     last.content.to_mut().push_str(&c.text);
                 } else {
-                    spans.push(Span::styled(c.text.clone(), c.style));
+                    spans.push(Span::styled(c.text.to_string(), c.style));
                 }
             }
             result.push(DisplayLine {
                 line: Line::from(spans),
                 source: source_start..source_end.max(source_start),
+                mappings,
+                image: None,
+                destinations,
             });
             first = false;
             if hard {
@@ -559,6 +793,68 @@ pub fn layout(document: &Document, width: usize, colors: bool) -> Vec<DisplayLin
             if start >= data.len() && (!hard || !line.code) {
                 break;
             }
+        }
+    }
+    result
+}
+
+/// 折返し・表形式によらない論理文字列とUTF-8ソース範囲。生成ラベルは除く。
+pub fn search_segments(document: &Document) -> Vec<crate::search::Segment> {
+    let mut result = Vec::new();
+    for line in sequence(&document.nodes, true, 0) {
+        let rendered: String = line
+            .runs
+            .iter()
+            .filter(|r| !r.source.is_empty())
+            .map(|r| r.text.as_str())
+            .collect();
+        let filtered = LogicalLine {
+            runs: line
+                .runs
+                .into_iter()
+                .filter(|r| !r.source.is_empty())
+                .collect(),
+            ..Default::default()
+        };
+        let mut segment = crate::search::Segment::default();
+        for cell in cells(&filtered, document, false, &rendered) {
+            if cell.text == "\n" {
+                if !segment.text.is_empty() {
+                    result.push(segment);
+                }
+                segment = crate::search::Segment::default();
+            } else {
+                let start = segment.text.len();
+                segment.text.push_str(&cell.text);
+                let previous_destination = segment
+                    .destinations
+                    .last()
+                    .is_some_and(|(r, _, _)| r.end == start);
+                if let Some((id, range)) = &cell.destination {
+                    segment
+                        .destinations
+                        .push((start..segment.text.len(), *id, range.clone()));
+                }
+                if let Some((logical, source)) =
+                    segment.mappings.last_mut().filter(|(logical, source)| {
+                        logical.len() == source.len()
+                            && cell.text.len() == cell.source.len()
+                            && source.end == cell.source.start
+                            && cell.destination.is_none()
+                            && !previous_destination
+                    })
+                {
+                    logical.end = segment.text.len();
+                    source.end = cell.source.end;
+                } else {
+                    segment
+                        .mappings
+                        .push((start..segment.text.len(), cell.source));
+                }
+            }
+        }
+        if !segment.text.is_empty() {
+            result.push(segment);
         }
     }
     result

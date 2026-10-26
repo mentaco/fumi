@@ -2,6 +2,14 @@ use clap::{Parser, ValueEnum};
 use std::{ffi::OsStr, path::PathBuf};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub enum GraphicsMode {
+    #[default]
+    Auto,
+    Off,
+    Kitty,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
 pub enum ColorMode {
     #[default]
     Auto,
@@ -28,6 +36,9 @@ pub struct Cli {
     /// 本文装飾の色を指定する
     #[arg(long, value_enum, default_value = "auto")]
     pub color: ColorMode,
+    /// 端末画像の方式を指定する（plain指定時は無効）
+    #[arg(long, value_enum, default_value = "auto")]
+    pub graphics: GraphicsMode,
     /// 閲覧するUTF-8の通常ファイル
     #[arg(value_name = "FILE")]
     pub file: PathBuf,

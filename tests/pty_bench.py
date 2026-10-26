@@ -37,8 +37,7 @@ with tempfile.TemporaryDirectory() as directory:
     resizes = []
     for run in range(3):
         start = time.monotonic()
-        session = Session(["--plain", fixture])
-        session.resize(120, 40)
+        session = Session(["--plain", fixture], size=(120, 40))
         try:
             frame(session)
             startup.append((time.monotonic() - start) * 1000)

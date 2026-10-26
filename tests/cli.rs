@@ -24,7 +24,7 @@ fn syntax_errors_precede_tty_checks() {
         vec![],
         vec!["a", "b"],
         vec!["--watch", "a"],
-        vec!["--graphics", "off", "a"],
+        vec!["--graphics", "unknown", "a"],
         vec!["--color", "wrong", "a"],
         vec!["-"],
     ] {
@@ -40,6 +40,7 @@ fn redirected_output_has_no_terminal_controls() {
     for args in [
         vec!["missing.md"],
         vec!["--plain", "missing.md"],
+        vec!["--graphics", "off", "missing.md"],
         vec!["--color", "always", "missing.md"],
         vec!["--", "-memo.md"],
     ] {

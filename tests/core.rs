@@ -65,10 +65,10 @@ fn markdown_visible_content() {
         "[rust]",
         "[image: 日本語の図] <./missing.png>",
         "[image] <https://example.com/image.png>",
-        "[row 1]",
-        "列3: (empty)",
-        "名前: mdview",
-        "用途: 日本語",
+        "┌",
+        "(empty)",
+        "mdview",
+        "日本語のMarkdown閲覧",
         "<div onclick=",
         "$x_i^2 + **literal**$",
         "\\frac{a_b}{c^2}",
@@ -159,10 +159,13 @@ fn unicode_widths_and_source_ranges() {
 #[test]
 fn tables_retain_empty_headers_cells_and_no_rows() {
     assert_eq!(
-        text("| | A |\n|---|---|\n| | v |", 80),
-        "[row 1]\n列1: (empty)\nA: v"
+        text("| | A |\n|---|---|\n| | v |", 10),
+        "[row 1]\n(列1):\n(empty)\nA: v"
     );
-    assert_eq!(text("| A | B |\n|---|---|", 80), "A\nB\n(no rows)");
+    assert_eq!(
+        text("| LongHeaderA | B |\n|---|---|", 12),
+        "LongHeaderA\nB\n(no row)"
+    );
 }
 
 #[test]
@@ -274,6 +277,40 @@ fn resize_keeps_source_and_small_mode_preserves_position() {
             .iter()
             .any(|c| c.symbol() == "%")
     );
+}
+
+#[test]
+fn height_resize_preserves_position_and_clamps_body_and_help() {
+    let mut app = long_app();
+    for _ in 0..12 {
+        key(&mut app, KeyCode::Char('j'));
+    }
+    let anchor = app.lines[app.top].source.clone();
+    app.resize(40, 20);
+    assert_eq!(app.lines[app.top].source, anchor);
+
+    key(&mut app, KeyCode::End);
+    app.resize(40, 30);
+    assert_eq!(app.top, app.max_top());
+    assert_eq!(app.percentage(), 100);
+    key(&mut app, KeyCode::Char('?'));
+    key(&mut app, KeyCode::End);
+    app.resize(40, 100);
+    assert!(app.status().contains("100% HELP"));
+    app.resize(40, 10);
+    key(&mut app, KeyCode::Home);
+    assert!(app.status().contains("0% HELP"));
+
+    key(&mut app, KeyCode::Esc);
+    let anchor = app.lines[app.top].source.clone();
+    app.resize(19, 3);
+    app.resize(40, 10);
+    assert_eq!(app.lines[app.top].source, anchor);
+    // 最小サイズから別の本文幅へ復帰する場合は折り返しを更新する。
+    app.resize(19, 3);
+    app.resize(80, 10);
+    assert!(app.lines.iter().all(|line| line.text().width() <= 78));
+    assert!(app.lines[app.top].source.contains(&anchor.start));
 }
 
 #[test]

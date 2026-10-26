@@ -3,6 +3,7 @@ use mdview::{
     app::App,
     cli::Cli,
     document::Document,
+    profile,
     source::{load, sanitize},
     terminal::{Signals, run},
 };
@@ -22,6 +23,11 @@ fn error(target: &str, message: &str, code: u8) -> ExitCode {
 }
 
 fn main() -> ExitCode {
+    if std::env::var_os("MDVIEW_INTERNAL_MATH_WORKER").as_deref() == Some(std::ffi::OsStr::new("1"))
+    {
+        return ExitCode::from(mdview::math::worker());
+    }
+    profile::start();
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(e) => {
@@ -44,7 +50,7 @@ fn main() -> ExitCode {
     if cli.file.as_os_str() == "-" {
         return error(
             "-",
-            "標準入力はMVPでは未対応です。実ファイルには ./- を指定してください",
+            "標準入力はv1では未対応です。実ファイルには ./- を指定してください",
             2,
         );
     }
@@ -59,6 +65,7 @@ fn main() -> ExitCode {
         Ok(s) => s,
         Err(e) => return error("端末", &e.to_string(), 1),
     };
+    profile::mark("setup_ms");
     let source = match load(&cli.file) {
         Ok(s) => s,
         Err(e) => {
@@ -68,6 +75,7 @@ fn main() -> ExitCode {
             );
         }
     };
+    profile::mark("load_ms");
     if let Some(code) = signals.exit_code() {
         return ExitCode::from(code);
     }
@@ -81,9 +89,12 @@ fn main() -> ExitCode {
         .file_name()
         .unwrap_or(cli.file.as_os_str())
         .to_string_lossy();
-    let app = App::new(Document::parse(source), &name, colors);
-    // MVPは常にテキスト描画。plainでも通常表示でも照会を送信しない。
-    match run(app, &signals) {
+    profile::mark("prepare_ms");
+    let document = Document::parse(source);
+    profile::mark("parse_ms");
+    let app = App::new(document, &name, colors);
+    profile::mark("app_ms");
+    match run(app, &signals, cli.graphics, cli.plain, colors) {
         Ok(code) => ExitCode::from(code),
         Err(e) => error("端末", &e.to_string(), 1),
     }

@@ -57,3 +57,25 @@ tmux / SSHの有無:
 終了・中断後のシェル状態:
 再現頻度:
 ```
+
+
+## v1追加確認（表示修正後もユーザー確認OK）
+
+2026-10-26の結果と対応は[v1検証記録](v1-verification.md)を参照。ユーザー報告の番号2、5〜10はOKで、行列と表は修正後の再確認もOKとの報告を受領した。環境詳細とチェック欄の個別条件の実施状況は未記録のため、以下は追加環境での再検証用として残す。
+
+```sh
+rtk proxy ./target/release/mdview tests/fixtures/v1.md
+rtk proxy ./target/release/mdview --plain --graphics kitty tests/fixtures/v1.md
+rtk proxy ./target/release/mdview --graphics off tests/fixtures/v1.md
+rtk proxy ./target/release/mdview --color never tests/fixtures/v1.md
+```
+
+- [ ] `/hello world`、`/日本語`、`/frac`で確定・0件・空入力再利用・`n/N`の循環・反転と下線を確認する。同じ行の一致も別々に数える。
+- [ ] 入力中のqは文字になる。Esc/Ctrl+cで語・一致・位置を戻す。Ctrl+u全消去、結合文字・絵文字のBackspace、256書記素上限と貼り付けを確認する。
+- [ ] ホイールが3表示行ずつ動き、ヘルプ内の移動は本文へ影響しない。終了・中断後にマウス選択が通常の端末動作へ戻る。
+- [ ] Rustコードに色が付き、未知言語は内容を保つ。色なしでは色が出ない。
+- [ ] 表が広い画面では左右／中央揃えの罫線付きになり、狭い画面では全セルを縦形式で読める。セルを検索した後のリサイズも同じ内容付近に留まる。
+- [ ] Kitty/GhosttyでKITTYになり、分数・根号・総和・積分・ギリシャ文字・pmatrix（丸括弧）・bmatrix（角括弧）・alignedが画像になる。未知コマンドだけTeXと理由へ戻る。
+- [ ] 数式の途中を上端・下端へ出す、j/kを連打、検索ジャンプ、ヘルプ開閉、リサイズ、Ctrl+z/fgを試す。残像・重複・ステータスへの侵入がなく、画像途中の行位置を保持する。
+- [ ] plain/off・非対応端末・tmux/screen・背景色不明ではTeXを読める。生成中にqで速やかに終了し、画像・raw mode・カーソル・マウスが復旧する。
+- [ ] 同一条件で初回と再実行、SSHでの直接転送、Linuxを別々に記録する。MVP時点の手動確認をv1の合格へ流用しない。

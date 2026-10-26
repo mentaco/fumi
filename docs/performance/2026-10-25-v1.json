@@ -1,0 +1,320 @@
+{
+  "date": "2026-10-25",
+  "os": "macOS 27.0.1 (26A434) arm64",
+  "rust": "1.92.0",
+  "python": "3.9.6",
+  "build": "release --locked --features startup-profile",
+  "binary_sha256": "67612f9cad1958142b39d2034b645839e63c4c892c1e7f9840d2136fa579efda",
+  "binary_bytes": 7034336,
+  "first_execution_after_build": {
+    "mode": "plain",
+    "fixture_sha256": "64acc416c3cd1f78664d53717fba63a4fcde25a454d300d8801a6fe2669e7352",
+    "run": 1,
+    "external_startup_ms": 440.657875,
+    "move_p95_ms": 18.975707999999926,
+    "search_open_ms": 48.65433400000008,
+    "search_input_ms": 19.1024999999998,
+    "search_confirm_ms": 1.080083000000176,
+    "resize_after_search_ms": 81.85558399999992,
+    "profile": {
+      "exec_to_main_ms": 343.682,
+      "setup_ms": 0.294041,
+      "load_ms": 0.487417,
+      "prepare_ms": 0.029833,
+      "parse_ms": 2.955959,
+      "app_ms": 0.035583,
+      "terminal_ms": 0.14725,
+      "layout_ms": 81.369167,
+      "draw_ms": 0.43275,
+      "main_to_flush_ms": 85.752
+    }
+  },
+  "isolated_repeated_series": {
+    "bytes": 1048576,
+    "lines": 10000,
+    "fixture_sha256": "1cfc494aed27e4b80f872fcf7b7ad0054bfa03f351c5d3310508b9a477e3d0df",
+    "results": [
+      {
+        "mode": "plain",
+        "fixture_sha256": "64acc416c3cd1f78664d53717fba63a4fcde25a454d300d8801a6fe2669e7352",
+        "run": 1,
+        "external_startup_ms": 71.371,
+        "move_p95_ms": 19.038958999999966,
+        "search_open_ms": 64.21774999999985,
+        "search_input_ms": 19.782917000000122,
+        "search_confirm_ms": 1.6497500000003384,
+        "resize_after_search_ms": 101.563917,
+        "profile": {
+          "exec_to_main_ms": 6.309,
+          "setup_ms": 1.567709,
+          "load_ms": 0.61175,
+          "prepare_ms": 0.183958,
+          "parse_ms": 2.866083,
+          "app_ms": 0.039459,
+          "terminal_ms": 0.181375,
+          "layout_ms": 55.827875,
+          "draw_ms": 0.452791,
+          "main_to_flush_ms": 61.731
+        }
+      },
+      {
+        "mode": "plain",
+        "fixture_sha256": "64acc416c3cd1f78664d53717fba63a4fcde25a454d300d8801a6fe2669e7352",
+        "run": 2,
+        "external_startup_ms": 70.84179199999996,
+        "move_p95_ms": 19.20483399999995,
+        "search_open_ms": 63.538957999999646,
+        "search_input_ms": 19.853999999999594,
+        "search_confirm_ms": 2.3879170000000727,
+        "resize_after_search_ms": 100.93849999999982,
+        "profile": {
+          "exec_to_main_ms": 4.953,
+          "setup_ms": 0.075917,
+          "load_ms": 0.516,
+          "prepare_ms": 0.005292,
+          "parse_ms": 3.803333,
+          "app_ms": 0.034542,
+          "terminal_ms": 0.166666,
+          "layout_ms": 57.452542,
+          "draw_ms": 0.432542,
+          "main_to_flush_ms": 62.486834
+        }
+      },
+      {
+        "mode": "plain",
+        "fixture_sha256": "64acc416c3cd1f78664d53717fba63a4fcde25a454d300d8801a6fe2669e7352",
+        "run": 3,
+        "external_startup_ms": 70.48074999999976,
+        "move_p95_ms": 19.053125000000115,
+        "search_open_ms": 77.46812499999933,
+        "search_input_ms": 19.500541000000204,
+        "search_confirm_ms": 2.795665999999919,
+        "resize_after_search_ms": 99.91637500000027,
+        "profile": {
+          "exec_to_main_ms": 5.09,
+          "setup_ms": 0.07975,
+          "load_ms": 0.699,
+          "prepare_ms": 0.006083,
+          "parse_ms": 3.445084,
+          "app_ms": 0.0265,
+          "terminal_ms": 0.1275,
+          "layout_ms": 57.182708,
+          "draw_ms": 0.414,
+          "main_to_flush_ms": 61.980625
+        }
+      },
+      {
+        "mode": "auto",
+        "fixture_sha256": "64acc416c3cd1f78664d53717fba63a4fcde25a454d300d8801a6fe2669e7352",
+        "run": 1,
+        "external_startup_ms": 71.74970800000047,
+        "move_p95_ms": 19.10212499999986,
+        "search_open_ms": 56.345875000001655,
+        "search_input_ms": 19.415291999999695,
+        "search_confirm_ms": 2.533875000001018,
+        "resize_after_search_ms": 96.36658400000009,
+        "profile": {
+          "exec_to_main_ms": 5.155,
+          "setup_ms": 0.066833,
+          "load_ms": 0.616834,
+          "prepare_ms": 0.00625,
+          "parse_ms": 3.844208,
+          "app_ms": 0.033708,
+          "terminal_ms": 0.177542,
+          "layout_ms": 57.706167,
+          "draw_ms": 0.399833,
+          "main_to_flush_ms": 62.851375
+        }
+      },
+      {
+        "mode": "auto",
+        "fixture_sha256": "64acc416c3cd1f78664d53717fba63a4fcde25a454d300d8801a6fe2669e7352",
+        "run": 2,
+        "external_startup_ms": 69.38741599999965,
+        "move_p95_ms": 19.09087499999984,
+        "search_open_ms": 58.88712500000004,
+        "search_input_ms": 19.54254199999994,
+        "search_confirm_ms": 2.6152079999999245,
+        "resize_after_search_ms": 94.52362500000078,
+        "profile": {
+          "exec_to_main_ms": 5.275,
+          "setup_ms": 0.08375,
+          "load_ms": 0.602,
+          "prepare_ms": 0.005667,
+          "parse_ms": 3.665083,
+          "app_ms": 0.023417,
+          "terminal_ms": 0.105583,
+          "layout_ms": 56.091667,
+          "draw_ms": 0.393333,
+          "main_to_flush_ms": 60.9705
+        }
+      },
+      {
+        "mode": "auto",
+        "fixture_sha256": "64acc416c3cd1f78664d53717fba63a4fcde25a454d300d8801a6fe2669e7352",
+        "run": 3,
+        "external_startup_ms": 69.08262500000006,
+        "move_p95_ms": 19.17729200000018,
+        "search_open_ms": 59.472042000001224,
+        "search_input_ms": 19.130625000000734,
+        "search_confirm_ms": 2.433207999999354,
+        "resize_after_search_ms": 91.29754199999951,
+        "profile": {
+          "exec_to_main_ms": 5.413,
+          "setup_ms": 0.081292,
+          "load_ms": 0.738625,
+          "prepare_ms": 0.004917,
+          "parse_ms": 3.471666,
+          "app_ms": 0.030084,
+          "terminal_ms": 0.105541,
+          "layout_ms": 55.421375,
+          "draw_ms": 0.364292,
+          "main_to_flush_ms": 60.217792
+        }
+      },
+      {
+        "mode": "auto-math",
+        "fixture_sha256": "1cfc494aed27e4b80f872fcf7b7ad0054bfa03f351c5d3310508b9a477e3d0df",
+        "run": 1,
+        "external_startup_ms": 285.76391700000056,
+        "move_p95_ms": 19.12520800000017,
+        "search_open_ms": 58.79920799999816,
+        "search_input_ms": 19.567957999999663,
+        "search_confirm_ms": 2.7249589999982504,
+        "resize_after_search_ms": 92.47420799999873,
+        "profile": {
+          "exec_to_main_ms": 4.643,
+          "setup_ms": 0.059875,
+          "load_ms": 0.559708,
+          "prepare_ms": 0.005292,
+          "parse_ms": 3.540833,
+          "app_ms": 0.027917,
+          "terminal_ms": 0.097708,
+          "layout_ms": 53.256708,
+          "draw_ms": 220.223459,
+          "main_to_flush_ms": 277.7715
+        }
+      },
+      {
+        "mode": "auto-math",
+        "fixture_sha256": "1cfc494aed27e4b80f872fcf7b7ad0054bfa03f351c5d3310508b9a477e3d0df",
+        "run": 2,
+        "external_startup_ms": 288.59354100000087,
+        "move_p95_ms": 19.056542000001286,
+        "search_open_ms": 56.84404199999804,
+        "search_input_ms": 19.487541000000164,
+        "search_confirm_ms": 1.4585830000015676,
+        "resize_after_search_ms": 90.03391699999952,
+        "profile": {
+          "exec_to_main_ms": 5.369,
+          "setup_ms": 0.082416,
+          "load_ms": 0.554084,
+          "prepare_ms": 0.005,
+          "parse_ms": 3.588416,
+          "app_ms": 0.029209,
+          "terminal_ms": 0.106916,
+          "layout_ms": 55.971667,
+          "draw_ms": 219.489625,
+          "main_to_flush_ms": 279.827333
+        }
+      },
+      {
+        "mode": "auto-math",
+        "fixture_sha256": "1cfc494aed27e4b80f872fcf7b7ad0054bfa03f351c5d3310508b9a477e3d0df",
+        "run": 3,
+        "external_startup_ms": 290.93612500000177,
+        "move_p95_ms": 19.622916999999518,
+        "search_open_ms": 51.58520900000241,
+        "search_input_ms": 19.275542000002588,
+        "search_confirm_ms": 2.9301670000023705,
+        "resize_after_search_ms": 92.69454200000027,
+        "profile": {
+          "exec_to_main_ms": 4.671,
+          "setup_ms": 0.062667,
+          "load_ms": 0.742375,
+          "prepare_ms": 0.005708,
+          "parse_ms": 3.746834,
+          "app_ms": 0.030583,
+          "terminal_ms": 0.09,
+          "layout_ms": 59.456542,
+          "draw_ms": 218.699541,
+          "main_to_flush_ms": 282.83425
+        }
+      }
+    ]
+  },
+  "math": {
+    "formula_results": [
+      {
+        "tex": "\\frac{1}{2}",
+        "worker_wall_ms": [
+          14.269541000000004,
+          4.788957999999996,
+          4.229333000000002
+        ],
+        "png_bytes": 1260
+      },
+      {
+        "tex": "\\sqrt{x}",
+        "worker_wall_ms": [
+          4.809042,
+          4.337416000000004,
+          4.275166999999996
+        ],
+        "png_bytes": 1249
+      },
+      {
+        "tex": "\\sum_{i=1}^n i",
+        "worker_wall_ms": [
+          4.543041999999997,
+          4.79750000000001,
+          6.006958000000006
+        ],
+        "png_bytes": 2468
+      },
+      {
+        "tex": "\\int_0^1 x dx",
+        "worker_wall_ms": [
+          5.616750000000003,
+          5.620500000000001,
+          5.659499999999998
+        ],
+        "png_bytes": 3212
+      },
+      {
+        "tex": "\\alpha_1^2+\\beta",
+        "worker_wall_ms": [
+          5.748291999999989,
+          5.831124999999993,
+          5.621833000000007
+        ],
+        "png_bytes": 2010
+      },
+      {
+        "tex": "\\begin{matrix}1&2\\\\3&4\\end{matrix}",
+        "worker_wall_ms": [
+          5.095792000000002,
+          5.083000000000004,
+          4.958832999999996
+        ],
+        "png_bytes": 2022
+      },
+      {
+        "tex": "\\begin{aligned}a&=b+c\\\\d&=e\\end{aligned}",
+        "worker_wall_ms": [
+          5.486292000000004,
+          4.808166000000003,
+          4.680957999999985
+        ],
+        "png_bytes": 2753
+      }
+    ],
+    "max_child_rss_bytes": 9076736
+  },
+  "notes": [
+    "PTYのmaster側でフレーム末尾を受信するまで。GUI端末描画は含まない。",
+    "最終の繰返し系列は他のビルド・PTYテストと並行実行せず測定。",
+    "画像応答なし。auto-mathは同じ1 MiB・1万行の冒頭2行をブロック数式と空行へ置換。",
+    "ワーカー最大RSSは新規PythonプロセスのRUSAGE_CHILDRENにおける21プロセスの最大値、macOSのbytes。UI全体の最大RSSではない。"
+  ]
+}

@@ -1,4 +1,4 @@
-name: MVP checks
+name: mdview checks
 on: [push, pull_request]
 jobs:
   test:
@@ -21,3 +21,4 @@ jobs:
       - run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - run: cargo test --locked --all-targets --all-features
       - run: python3 tests/pty_smoke.py target/debug/mdview
+      - run: python3 tests/pty_v1.py target/debug/mdview

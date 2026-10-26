@@ -9,14 +9,19 @@ pub const MAX_BYTES: u64 = 32 * 1024 * 1024;
 
 /// LFとタブも、構造として扱う場所を除き必ず可視化する。
 pub fn sanitize(text: &str) -> String {
-    text.chars()
-        .map(|c| match c {
-            '\u{1b}' => "␛".into(),
-            '\0' => "␀".into(),
-            c if c.is_control() => format!("\\u{{{:04X}}}", c as u32),
-            c => c.to_string(),
-        })
-        .collect()
+    use std::fmt::Write;
+    let mut result = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '\u{1b}' => result.push('␛'),
+            '\0' => result.push('␀'),
+            c if c.is_control() => {
+                let _ = write!(result, "\\u{{{:04X}}}", c as u32);
+            }
+            c => result.push(c),
+        }
+    }
+    result
 }
 
 pub fn load(path: &Path) -> io::Result<String> {
