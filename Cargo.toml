@@ -4,6 +4,7 @@ version = "0.2.0"
 edition = "2024"
 rust-version = "1.88"
 description = "読み取り専用のMarkdownターミナルビューア"
+license = "MIT"
 
 [features]
 startup-profile = []

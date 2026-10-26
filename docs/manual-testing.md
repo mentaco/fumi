@@ -1,21 +1,21 @@
-# 実端末でのMVPデバッグ
+# 実端末チェックリスト
 
-自動検証済みの範囲は[検証記録](verification.md)を参照してください。ここでは実端末の表示・操作・復旧を優先して確認します。
+ここでは実端末の表示・操作・復旧を確認します。自動検証の成功と、実端末での確認結果は分けて記録してください。
 
-2026-10-25、ユーザーから、チャットで提示した6観点（端末復旧、中断再開、文字幅、リサイズ、操作、Markdown・数式の内容保持）をデバッグし、問題なかったとの報告を受領しました。検証環境はGhostty 1.3.1 / macOS 27.0.1 / RobotoMono Nerd Fontです。画面サイズ等の追加条件と、下記の個々の条件の実施状況は未記録です。以下のチェック欄は再検証用として未チェックのまま残します。
+MVPとv1の結果はそれぞれ[検証記録](verification.md)と[v1検証記録](v1-verification.md)に保存しています。以下のチェック欄は追加環境での再検証用です。過去の確認報告だけで個々の条件を実施済みとは扱いません。
 
 ## 準備
 
 リポジトリのルートでビルドし、代表fixtureを開きます。
 
 ```sh
-rtk cargo build --release --locked
-rtk proxy ./target/release/mdview tests/fixtures/representative.md
+cargo build --release --locked
+./target/release/mdview tests/fixtures/representative.md
 ```
 
 最初は普段使っている端末で確認し、その後、利用できるTerminal.app・Ghostty・kitty等でも同じ操作を試してください。OS・端末・フォントの名称とバージョン、画面サイズ、tmux・SSHの有無を記録します。
 
-## 優先して確認する項目
+## 基本表示・操作の確認
 
 - [ ] **終了後の端末復旧**：通常画面で`q`、別の起動で`Esc`、さらに別の起動で`Ctrl+c`を試す。毎回元のシェル画面へ戻り、カーソルが見え、文字入力・Enter・Backspaceが正常に使える。終了コードは順に0・0・130。
 - [ ] **中断と復帰**：本文を途中まで読み、`Ctrl+z`でシェルへ戻る。シェルの`fg`で同じ文書位置へ復帰できる。中断中にウィンドウをリサイズした場合も本文とステータスが壊れない。
@@ -24,50 +24,31 @@ rtk proxy ./target/release/mdview tests/fixtures/representative.md
 - [ ] **最小サイズからの復帰**：幅20セル未満、または高さ4行未満へ縮める。サイズ不足の表示になり、移動キーを押しても位置が変わらない。広げると元の位置へ戻る。サイズ不足中も`q`・`Ctrl+c`で終了できる。
 - [ ] **移動量と上下端**：`j/k`・上下矢印、`Ctrl+d/u`、`Ctrl+f/b`・PageDown/Upを試す。移動単位は折り返し後の表示行。`gg`・Homeで先頭、`G`・Endで末尾になり、末尾に余分な空ページができない。長い文書は先頭0%・末尾100%、画面に収まる文書は100%。
 - [ ] **ヘルプとg待ち**：本文途中で`?`を押し、ヘルプ内を移動する。`q`・`Esc`・`?`で閉じると本文位置を維持し、次に開くとヘルプ先頭から表示する。通常画面で`g`→`Esc`は待ち状態だけを解除し、続く`Esc`で終了する。`g`→`j`は1行下へ動く。
-- [ ] **Markdownの内容保持**：見出し、引用、ネストしたリスト、9から始まる番号、タスク、コードの空白・タブ、長い行の`↪`、リンク先、画像代替を確認する。表は縦形式で全セルを読め、空セルも残る。HTMLはタグを文字として表示する。
-- [ ] **数式**：`$x_i^2 + **literal**$`とブロック数式をTeXソースのまま読める。数式中の`**`等が装飾に変わらず、金額・エスケープ・コード内のドル記号・未閉鎖の数式で後続本文が消えない。
+- [ ] **Markdownの内容保持**：見出し、引用、ネストしたリスト、9から始まる番号、タスク、コードの空白・タブ、長い行の`↪`、リンク先、画像代替を確認する。表は画面幅に応じて表形式・縦形式になり、どちらでも全セルを読める。HTMLはタグを文字として表示する。
+- [ ] **数式のテキスト表示**：`--plain`で`$x_i^2 + **literal**$`とブロック数式をTeXソースのまま読める。数式中の`**`等が装飾に変わらず、金額・エスケープ・コード内のドル記号・未閉鎖の数式で後続本文が消えない。
 - [ ] **plainと色**：下記の起動方法を比較する。plainでも全画面TUIとして操作できる。色なしでも見出し・ステータスを識別でき、`NO_COLOR`設定時も明示したalwaysでは色が出る。
 - [ ] **応答性**：普段使う大きめの文書で、最初の表示、移動キー連打、連続リサイズの引っ掛かりを確認する。初回と2回目以降を分けて記録する。初回起動200 ms目標は既存測定で未達。
 
 色・plainの比較用コマンドです。それぞれ終了してから次を起動してください。
 
 ```sh
-rtk proxy ./target/release/mdview --plain tests/fixtures/representative.md
-rtk proxy ./target/release/mdview --color never tests/fixtures/representative.md
-rtk proxy env NO_COLOR=1 ./target/release/mdview --color auto tests/fixtures/representative.md
-rtk proxy env NO_COLOR=1 ./target/release/mdview --color always tests/fixtures/representative.md
+./target/release/mdview --plain tests/fixtures/representative.md
+./target/release/mdview --color never tests/fixtures/representative.md
+env NO_COLOR=1 ./target/release/mdview --color auto tests/fixtures/representative.md
+env NO_COLOR=1 ./target/release/mdview --color always tests/fixtures/representative.md
 ```
 
-検索、マウスホイール、数式の画像化、Markdown画像の表示、シンタックスハイライトはMVPの対象外です。
+検索、マウスホイール、数式画像化、コードハイライトは下記のv1確認で扱います。Markdown画像の実画像表示は未実装です。
 
-## 不具合報告に残す内容
+## v1の追加確認
 
-```text
-コミット:
-OS / CPU:
-端末名・バージョン:
-フォント名・サイズ:
-tmux / SSHの有無:
-端末の幅×高さ（セル数）:
-起動コマンド:
-再現するMarkdown（共有できる最小の内容）:
-押したキーとリサイズの順序:
-期待した動作:
-実際の動作（スクリーンショットがあれば添付）:
-終了・中断後のシェル状態:
-再現頻度:
-```
-
-
-## v1追加確認（表示修正後もユーザー確認OK）
-
-2026-10-26の結果と対応は[v1検証記録](v1-verification.md)を参照。ユーザー報告の番号2、5〜10はOKで、行列と表は修正後の再確認もOKとの報告を受領した。環境詳細とチェック欄の個別条件の実施状況は未記録のため、以下は追加環境での再検証用として残す。
+[手動確認用Markdown](examples/manual-debug.md)には数式・検索・表・コードの確認例があります。リポジトリのルートから開けます。結果はOS・端末・フォント・画面サイズとともに記録してください。
 
 ```sh
-rtk proxy ./target/release/mdview tests/fixtures/v1.md
-rtk proxy ./target/release/mdview --plain --graphics kitty tests/fixtures/v1.md
-rtk proxy ./target/release/mdview --graphics off tests/fixtures/v1.md
-rtk proxy ./target/release/mdview --color never tests/fixtures/v1.md
+./target/release/mdview docs/examples/manual-debug.md
+./target/release/mdview --plain --graphics kitty docs/examples/manual-debug.md
+./target/release/mdview --graphics off docs/examples/manual-debug.md
+./target/release/mdview --color never docs/examples/manual-debug.md
 ```
 
 - [ ] `/hello world`、`/日本語`、`/frac`で確定・0件・空入力再利用・`n/N`の循環・反転と下線を確認する。同じ行の一致も別々に数える。
@@ -80,3 +61,7 @@ rtk proxy ./target/release/mdview --color never tests/fixtures/v1.md
 - [ ] plain/off・非対応端末・tmux自動設定失敗・screen・背景色不明ではTeXを読める。生成中にqで速やかに終了し、画像・raw mode・カーソル・マウスが復旧する。
 - [ ] Unicodeプレースホルダー対応端末上のtmux（RGB色を保持）で、手動のパススルー設定なしで起動し、対象ペインだけ`allow-passthrough all`となり数式画像が見える。plain/off・数式なしでは設定を変更しない。上下クリッピング、ヘルプ、検索、ペイン分割・移動・ズーム・リサイズ、ウィンドウ切替と復帰を試し、ステータスや別ペインに残像がないことを確認する。別ペインにフォーカスしたままサイズを変えた後も画像が戻る。二つのmdviewを同時に開き、片方の終了が他方の画像を消さないことも確認する。
 - [ ] 同一条件で初回と再実行、SSHでの直接転送、Linuxを別々に記録する。MVP時点の手動確認をv1の合格へ流用しない。
+
+## 結果の記録
+
+実施した条件と未実施の条件を分け、[不具合報告の項目](../CONTRIBUTING.md#不具合報告)を使って記録してください。スクリーンショットや文書を共有する前に、個人情報と認証情報を除いてください。

@@ -7,13 +7,13 @@
 ## 環境
 
 - macOS 27.0.1 / Build 26A434、Darwin 27.0.0、arm64。
-- Rust 1.92.0 / 1.99.1、Python 3.9.6。性能調査時に読み取り権限を拡張してCPU・メモリを取得した結果、Apple M3・16 GiBだった。
+- Rust 1.92.0 / 1.99.1、Python 3.9.6。測定機はApple M3・16 GiB。
 - PTYはPython標準ライブラリで作成。`TERM=xterm-256color`。シェル相当の監督プロセスを残してforeground process groupを設定し、ビューア終了後も同じ端末の属性を比較する。
 - 自動検証ではGUI端末・フォントは使用していない。Ghosttyでのユーザー手動確認は次節に記録する。Terminal.app / kitty / GNOME Terminal、tmux、SSH、Linuxの検証実績は未記録。
 
 ## ユーザーによる手動確認
 
-2026-10-25、ユーザーから、提示した確認事項をデバッグした結果、問題なかったとの報告を受領した。直前のチャットで提示した観点は次の6項目。
+2026-10-25、ユーザーから、提示した確認事項をデバッグした結果、問題なかったとの報告を受領した。確認対象は次の6項目。
 
 | 項目 | ユーザーから共有された環境 |
 |---|---|
@@ -34,7 +34,7 @@
 
 [初回のGitHub Actions実行](https://github.com/mentaco/mdviewer/actions/runs/40165437830)は、Ubuntu・macOSともにfmtを通過し、Clippyで終了コード101となった。RustテストとPTY検証には進んでいない。macOSジョブ全体にはmatrixのfail-fastによるキャンセルも記録された。
 
-ユーザーが共有した詳細ログでは、ヘルプの位置表示に対して`clippy::manual_checked_ops`が警告されていた。従来のローカルRust 1.92.0では検出されなかったが、別の一時RUSTUP_HOMEとビルド出力先を使ったRust 1.99.1で同じ警告を再現した。
+共有されたCIログでは、ヘルプの位置表示に対して`clippy::manual_checked_ops`が警告されていた。従来のローカルRust 1.92.0では検出されなかったが、別の一時RUSTUP_HOMEとビルド出力先を使ったRust 1.99.1で同じ警告を再現した。
 
 - 本文とヘルプの位置計算を`checked_div(...).unwrap_or(100)`へ変更した。画面に収まる場合は100%、スクロール可能な場合は先頭0%・末尾100%という表示規則を維持する。
 - ヘルプが画面に収まる場合・スクロールする場合・リサイズ・本文へ戻る場合の進捗表示をテストへ追加した。Rust 1.92.0と1.99.1でfmt・Clippy・通常テスト17件が通過した。
@@ -49,12 +49,12 @@
 ## 実行したチェック
 
 ```sh
-rtk cargo fmt --all -- --check
-rtk cargo clippy --all-targets --all-features -- -D warnings
-rtk cargo test --all-targets --all-features
-rtk proxy python3 tests/pty_smoke.py target/debug/mdview
-rtk cargo build --release --locked
-rtk proxy python3 tests/pty_bench.py target/release/mdview
+cargo fmt --all -- --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all-targets --all-features
+python3 tests/pty_smoke.py target/debug/mdview
+cargo build --release --locked
+python3 tests/pty_bench.py target/release/mdview
 ```
 
 性能改善後のRustの通常テストは18件（高さだけのリサイズ、本文・ヘルプの上下端、最小サイズからの復帰の回帰テストを追加）。Rust 1.92.0 / 1.99.1でfmt・Clippy・通常テストが成功し、1.99.1でPTY検証11グループも成功した。加えて通常実行ではignoreされるPTY専用の故障注入テスト1件を、PTYスクリプトから3種類の故障条件で実行する。GUI端末の目視確認を代替するものではない。

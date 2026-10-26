@@ -113,14 +113,14 @@ Ratatui 0.29.0の実装で`Terminal::draw`がバックエンドのflush後に復
 処理内訳を測る（このビルド成果物の初回を測る場合は、ビルド後に別途起動しない）。
 
 ```sh
-rtk cargo build --release --locked --features startup-profile
-rtk proxy python3 tests/pty_profile.py target/release/mdview --runs 5 --fixtures ascii paragraphs japanese table math longword
+cargo build --release --locked --features startup-profile
+python3 tests/pty_profile.py target/release/mdview --runs 5 --fixtures ascii paragraphs japanese table math longword
 ```
 
 同じ内容の新しい実行ファイルで対照実験を行う。各コピーの初回と再実行を分ける。
 
 ```sh
-rtk proxy python3 tests/pty_profile.py target/release/mdview --runs 3 --moves 0 --copy-binary --fixtures ascii ascii ascii
+python3 tests/pty_profile.py target/release/mdview --runs 3 --moves 0 --copy-binary --fixtures ascii ascii ascii
 ```
 
 スクリプトは一時ディレクトリのfixture、実行ファイルのコピー、計測JSONを終了時に削除し、結果を標準出力にJSON行として出力する。`--moves 0`で起動・リサイズだけを測れる。手動で計測ビルドを起動する場合は`MDVIEW_PROFILE`へ計測JSONの新規パスを明示する。既存ファイルは上書きせず、作成できない場合は端末を復旧してエラー終了する。`MDVIEW_PROFILE_EXEC_NS`はハーネスが`execv`直前に設定するため、通常は手動指定しない。
@@ -128,8 +128,8 @@ rtk proxy python3 tests/pty_profile.py target/release/mdview --runs 3 --moves 0 
 通常ビルドで外側からだけ測る場合は、従来のベンチマークを使う。
 
 ```sh
-rtk cargo build --release --locked
-rtk proxy python3 tests/pty_bench.py target/release/mdview
+cargo build --release --locked
+python3 tests/pty_bench.py target/release/mdview
 ```
 
 ## 検証と残る課題

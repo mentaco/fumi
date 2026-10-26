@@ -1,12 +1,23 @@
 KaTeX font files (KaTeX_*.ttf)
 ================================
 
-These TrueType fonts are taken from the KaTeX project:
+These TrueType fonts are bundled by ratex-katex-fonts 0.1.15 and originate
+from the KaTeX project:
   https://github.com/KaTeX/KaTeX
 
 They are licensed under the SIL Open Font License, Version 1.1. The full
-license text is in OFL.txt in this directory.
+license text is in KaTeX-OFL.txt in this directory.
 
-KaTeX's own MIT license applies to its software, not to the font binaries;
-font licensing follows OFL as described in KaTeX's documentation and
-upstream repository.
+The following copyright and reserved names are recorded in the name tables
+of the TTF files in ratex-katex-fonts 0.1.15:
+
+Copyright (c) 2009-2010 Design Science, Inc.
+Copyright (c) 2014-2018 Khan Academy
+
+Reserved Font Names:
+KaTeX_AMS, KaTeX_Caligraphic, KaTeX_Fraktur, KaTeX_Main, KaTeX_Math,
+KaTeX_SansSerif, KaTeX_Script, KaTeX_Size1, KaTeX_Size2, KaTeX_Size3,
+KaTeX_Size4, KaTeX_Typewriter.
+
+This notice describes the font files distributed in that dependency
+version. It does not assert the licensing of other upstream font releases.
