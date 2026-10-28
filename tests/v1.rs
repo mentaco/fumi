@@ -127,6 +127,68 @@ fn search_grapheme_limit_backspace_paste_and_modes() {
     assert!(app.search.input.is_none());
 }
 #[test]
+fn escape_cancels_input_and_modes_before_ending_search() {
+    let mut app = app(&"[hello](https://example.com)\n\n".repeat(25));
+    query(&mut app, "example.com");
+    key(&mut app, KeyCode::Char('N'));
+    let top = app.top;
+    let current = app.search.current;
+    assert!(app.search.wrapped);
+    assert!(!app.search.destination_matches.is_empty());
+
+    key(&mut app, KeyCode::Char('/'));
+    app.paste("missing");
+    assert_eq!(key(&mut app, KeyCode::Esc), Action::None);
+    assert!(app.search.input.is_none());
+    assert_eq!(app.search.query, "example.com");
+    assert_eq!(app.search.current, current);
+    assert_eq!(app.top, top);
+
+    key(&mut app, KeyCode::Char('?'));
+    assert_eq!(key(&mut app, KeyCode::Esc), Action::None);
+    assert!(!app.help);
+    assert_eq!(app.search.current, current);
+    key(&mut app, KeyCode::Char('g'));
+    assert_eq!(key(&mut app, KeyCode::Esc), Action::None);
+    assert!(!app.pending_g);
+    assert_eq!(app.search.current, current);
+
+    assert_eq!(key(&mut app, KeyCode::Esc), Action::None);
+    assert!(app.search.query.is_empty());
+    assert!(app.search.matches.is_empty());
+    assert!(app.search.current.is_none());
+    assert!(app.search.destination_matches.is_empty());
+    assert!(!app.search.wrapped);
+    assert!(!app.status().contains("example.com"));
+    for code in [KeyCode::Char('n'), KeyCode::Char('N'), KeyCode::Esc] {
+        assert_eq!(key(&mut app, code), Action::None);
+        assert_eq!(app.top, top);
+    }
+    query(&mut app, "");
+    assert!(app.search.matches.is_empty());
+    assert_eq!(app.top, top);
+    app.resize(80, 8);
+    assert!(app.search.matches.is_empty());
+    query(&mut app, "hello");
+    assert_eq!(app.search.matches.len(), 25);
+    assert_eq!(key(&mut app, KeyCode::Char('q')), Action::Exit(0));
+}
+#[test]
+fn escape_clears_no_match_search_and_search_in_small_terminal() {
+    for size in [(40, 8), (10, 2)] {
+        let mut app = app("日本語");
+        query(&mut app, "missing");
+        assert!(app.status().contains("見つかりません"));
+        app.resize(size.0, size.1);
+        assert_eq!(key(&mut app, KeyCode::Esc), Action::None);
+        app.resize(40, 8);
+        assert!(!app.status().contains("見つかりません"));
+        assert!(app.search.query.is_empty());
+        assert_eq!(key(&mut app, KeyCode::Esc), Action::None);
+        assert_eq!(app.top, 0);
+    }
+}
+#[test]
 fn search_highlights_all_matches_without_color() {
     let mut app = App::new(
         Document::parse("**hello** world hello world".into()),
@@ -134,8 +196,11 @@ fn search_highlights_all_matches_without_color() {
         false,
     );
     app.resize(40, 8);
-    query(&mut app, "hello world");
     let mut terminal = Terminal::new(TestBackend::new(40, 8)).unwrap();
+    terminal.draw(|f| app.draw(f)).unwrap();
+    let original = terminal.backend().buffer().clone();
+    let original_status = app.status();
+    query(&mut app, "hello world");
     terminal.draw(|f| app.draw(f)).unwrap();
     let cells = &terminal.backend().buffer().content;
     assert!(
@@ -148,6 +213,13 @@ fn search_highlights_all_matches_without_color() {
             .iter()
             .any(|c| c.modifier.contains(Modifier::UNDERLINED))
     );
+    assert_eq!(key(&mut app, KeyCode::Esc), Action::None);
+    terminal.draw(|f| app.draw(f)).unwrap();
+    assert_eq!(
+        &terminal.backend().buffer().content[..40 * 7],
+        &original.content[..40 * 7]
+    );
+    assert_eq!(app.status(), original_status);
 }
 #[test]
 fn tables_choose_natural_width_align_and_preserve_empty_values() {

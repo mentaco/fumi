@@ -125,7 +125,7 @@ def integration(initial=None, flags=(), no_math=False, lifecycle=True):
                 tmux("send-keys", "-t", "fumi:0.0", "-l", "?")
                 session.pump(.1)
                 assert PLACEHOLDER not in tmux("capture-pane", "-p", "-t", "fumi:0.0")
-                tmux("send-keys", "-t", "fumi:0.0", "-l", "q")
+                tmux("send-keys", "-t", "fumi:0.0", "-l", "?")
                 session.pump(.2)
                 pane_pid = int(tmux("display-message", "-p", "-t", "fumi:0.0", "#{pane_pid}"))
                 tmux("send-keys", "-t", "fumi:0.0", "C-z")

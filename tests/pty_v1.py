@@ -84,7 +84,7 @@ def graphics_lifecycle(tmux=False):
         since = len(session.data)
         session.pump(.05)
         assert not any(fields.get(b"a") == b"p" for fields, _ in commands(session, since))
-        session.send(b"q")
+        session.send(b"?")
         session.resize(40, 8)
         session.pump(.02)
         respond(session)

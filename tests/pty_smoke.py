@@ -194,7 +194,7 @@ def interaction():
         session.send(b"gg")
         session.send(b"?")
         assert "操作一覧" in session.visible()
-        session.send(b"Gggq")
+        session.send(b"Ggg?")
         session.resize(20, 4)
         session.pump()
         session.resize(10, 2)
@@ -223,6 +223,24 @@ def exit_path(key=None, sig=None, code=0):
         session.wait(code)
         assert b"\x1b[?1049l" in session.data and b"\x1b[?25h" in session.data
         assert b"\x1b[?1000l" in session.data and b"\x1b[?1006l" in session.data
+    finally:
+        session.close()
+
+
+def escape_keeps_viewer_open():
+    session = Session(["--plain", FIXTURE])
+    try:
+        session.started()
+        for keys in [b"\x1b", b"/Markdown\r", b"\x1b", b"nN", b"/\r", b"\x1b"]:
+            session.send(keys)
+            session.pump(.08)  # 単独Escの判定タイムアウトを待つ。
+            ready, _, _ = select.select([session.status_pipe], [], [], 0)
+            assert not ready, "Escでツールが終了した"
+            assert b"\x1b[?1049l" not in session.data
+            assert not termios.tcgetattr(session.slave)[3] & termios.ICANON
+        session.send(b"q")
+        session.wait(0)
+        assert b"\x1b[?1049l" in session.data and b"\x1b[?25h" in session.data
     finally:
         session.close()
 
@@ -337,7 +355,8 @@ def restoration_faults():
 
 if __name__ == "__main__":
     case("表示・操作・ヘルプ・リサイズ・読取専用・plain", interaction)
-    case("Esc終了", lambda: exit_path(key=b"\x1b"))
+    case("Esc検索終了・閲覧継続・q終了の端末復旧", escape_keeps_viewer_open)
+    case("ヘルプ表示中のq終了・端末復旧", lambda: exit_path(key=b"?q"))
     case("Ctrl+c終了", lambda: exit_path(key=b"\x03", code=130))
     case("SIGINT終了", lambda: exit_path(sig=signal.SIGINT, code=130))
     case("SIGTERM終了", lambda: exit_path(sig=signal.SIGTERM, code=143))

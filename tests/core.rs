@@ -222,11 +222,24 @@ fn scrolling_help_and_pending_g() {
     assert_eq!(app.top, 1);
     key(&mut app, KeyCode::Char('g'));
     key(&mut app, KeyCode::Char('g'));
-    assert_eq!(key(&mut app, KeyCode::Char('q')), Action::None);
+    assert_eq!(key(&mut app, KeyCode::Esc), Action::None);
     assert!(!app.help);
     assert_eq!(key(&mut app, KeyCode::Char('q')), Action::Exit(0));
     assert_eq!(ctrl(&mut app, 'c'), Action::Exit(130));
     assert_eq!(ctrl(&mut app, 'z'), Action::Suspend);
+}
+
+#[test]
+fn q_exits_from_help_including_pending_g() {
+    for pending_g in [false, true] {
+        let mut app = long_app();
+        key(&mut app, KeyCode::Char('?'));
+        if pending_g {
+            key(&mut app, KeyCode::Char('g'));
+        }
+        assert!(app.help);
+        assert_eq!(key(&mut app, KeyCode::Char('q')), Action::Exit(0));
+    }
 }
 
 #[test]
