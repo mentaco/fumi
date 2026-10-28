@@ -76,7 +76,7 @@ def main():
             path.write_bytes(data)
             executable = binary
             if args.copy_binary:
-                executable = root / (kind + "-mdview")
+                executable = root / (kind + "-fumi")
                 executable.unlink(missing_ok=True)
                 shutil.copyfile(binary, executable)
                 executable.chmod(0o755)
@@ -86,7 +86,7 @@ def main():
                 profile_path.unlink(missing_ok=True)
                 start = time.monotonic()
                 session = Session(["--plain", path], size=(120, 40), binary=str(executable),
-                    extra_env={"MDVIEW_PROFILE": str(profile_path)}, exec_clock_env="MDVIEW_PROFILE_EXEC_NS")
+                    extra_env={"FUMI_PROFILE": str(profile_path)}, exec_clock_env="FUMI_PROFILE_EXEC_NS")
                 try:
                     frame(session)
                     external = (time.monotonic() - start) * 1000

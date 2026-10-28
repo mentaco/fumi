@@ -1,4 +1,6 @@
-# mdview
+# fumi
+
+正式名称・コマンド名は `fumi` です（旧仮称: `mdview`）。
 
 日本語と数式を含むMarkdownを、ターミナルで読むための読み取り専用CLI/TUIです。macOSとLinuxを対象に、Vim風の移動、検索、コードハイライト、画面幅に応じた表表示を提供します。対応端末ではブロック数式を画像で表示します。
 
@@ -10,14 +12,14 @@ RustとCargoを用意し、リポジトリのルートで実行します。
 
 ```sh
 cargo build --release --locked
-./target/release/mdview README.md
+./target/release/fumi README.md
 ```
 
 PATHから使う場合は、チェックアウトしたソースからインストールできます。
 
 ```sh
 cargo install --path . --locked
-mdview README.md
+fumi README.md
 ```
 
 `Cargo.toml`の最小Rustバージョン指定は1.88です。ローカル検証は主にRust 1.92.0で行っており、1.88でのビルドは未検証です。実行時にRust、Node.js、ブラウザ、外部TeXは不要です。
@@ -27,10 +29,10 @@ stdinとstdoutがTTYで、`TERM`が有効な対話端末から起動してくだ
 ## 使い方
 
 ```sh
-mdview notes.md
-mdview --plain notes.md
-mdview --graphics off --color never notes.md
-mdview --help
+fumi notes.md
+fumi --plain notes.md
+fumi --graphics off --color never notes.md
+fumi --help
 ```
 
 `--plain`は能力照会と画像転送を無効にする全画面テキストTUIです。検索・色・表表示は使えます。`--graphics auto|off|kitty`の既定は`auto`で、`--plain`が優先します。`--color auto|always|never`の`auto`は空でない`NO_COLOR`を尊重します。
@@ -65,4 +67,4 @@ Markdown画像の実画像表示、インライン数式の画像化、標準入
 
 ## ライセンス
 
-mdview本体は[MIT License](LICENSE)で公開します。依存ライブラリと同梱フォントにはそれぞれのライセンスが適用されます。出典と同梱通知は[第三者コンポーネント](THIRD_PARTY_NOTICES.md)を参照してください。
+fumi本体は[MIT License](LICENSE)で公開します。依存ライブラリと同梱フォントにはそれぞれのライセンスが適用されます。出典と同梱通知は[第三者コンポーネント](THIRD_PARTY_NOTICES.md)を参照してください。

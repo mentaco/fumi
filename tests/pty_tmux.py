@@ -38,9 +38,9 @@ class TmuxSession(Session):
 
     def __init__(self, socket, config, args):
         self.responded = 0
-        # tmux自身の初期能力照会が済んでからmdviewを起動する。
+        # tmux自身の初期能力照会が済んでからfumiを起動する。
         launcher = "import os,sys,time; time.sleep(.4); os.execv(sys.argv[1],sys.argv[1:])"
-        super().__init__(["-S", socket, "-f", config, "-u", "new-session", "-s", "mdview",
+        super().__init__(["-S", socket, "-f", config, "-u", "new-session", "-s", "fumi",
                           sys.executable, "-c", launcher, BINARY] + args,
                          binary=TMUX, term="xterm-256color", size=(80, 24))
 
@@ -70,7 +70,7 @@ class TmuxSession(Session):
 
 
 def integration(initial=None, flags=(), no_math=False, lifecycle=True):
-    with tempfile.TemporaryDirectory(prefix="mdview-tmux-") as directory:
+    with tempfile.TemporaryDirectory(prefix="fumi-tmux-") as directory:
         socket = str(Path(directory) / "socket")
         config = Path(directory) / "tmux.conf"
         settings = "set -g status off\nset -as terminal-features ',xterm-256color:RGB'\n"
@@ -95,48 +95,48 @@ def integration(initial=None, flags=(), no_math=False, lifecycle=True):
                 assert time.monotonic() < until, bytes(session.data)
             assert config.read_bytes() == before_config, "tmux設定ファイルが変更された"
             assert tmux("show-options", "-gv", "allow-passthrough").strip() == (initial or "off"), "グローバル設定が変更された"
-            assert tmux("show-options", "-pAv", "-t", "mdview:0.0", "allow-passthrough").strip() == ("all" if rich else (initial or "off"))
-            tmux("send-keys", "-t", "mdview:0.0", "-l", "/frac")
-            tmux("send-keys", "-t", "mdview:0.0", "Enter")
+            assert tmux("show-options", "-pAv", "-t", "fumi:0.0", "allow-passthrough").strip() == ("all" if rich else (initial or "off"))
+            tmux("send-keys", "-t", "fumi:0.0", "-l", "/frac")
+            tmux("send-keys", "-t", "fumi:0.0", "Enter")
             session.pump(.4)
             if rich:
-                capture = tmux("capture-pane", "-p", "-e", "-t", "mdview:0.0")
+                capture = tmux("capture-pane", "-p", "-e", "-t", "fumi:0.0")
                 assert PLACEHOLDER in capture, capture
                 assert "38;2;" in capture, "画像IDのRGB色が保持されていない"
                 assert all(f.get(b"U") == b"1" for f, _ in commands(session) if f.get(b"a") == b"p")
             if rich and lifecycle:
                 # ペイン分割とリサイズ。外側の画面寸法ではなくペインのセル幅を使う。
-                tmux("split-window", "-h", "-t", "mdview:0.0", "sleep", "60")
+                tmux("split-window", "-h", "-t", "fumi:0.0", "sleep", "60")
                 session.pump(.5)
-                capture = tmux("capture-pane", "-p", "-t", "mdview:0.0")
+                capture = tmux("capture-pane", "-p", "-t", "fumi:0.0")
                 assert PLACEHOLDER in capture, capture
-                assert PLACEHOLDER not in tmux("capture-pane", "-p", "-t", "mdview:0.1")
-                assert tmux("show-options", "-pAv", "-t", "mdview:0.1", "allow-passthrough").strip() == (initial or "off"), "他ペインの設定が変更された"
+                assert PLACEHOLDER not in tmux("capture-pane", "-p", "-t", "fumi:0.1")
+                assert tmux("show-options", "-pAv", "-t", "fumi:0.1", "allow-passthrough").strip() == (initial or "off"), "他ペインの設定が変更された"
                 # 別ウィンドウへ切り替えて戻しても、通常のセルとして再描画される。
-                tmux("new-window", "-t", "mdview:1", "sleep", "60")
+                tmux("new-window", "-t", "fumi:1", "sleep", "60")
                 session.pump(.1)
                 since = len(session.data)
-                tmux("select-window", "-t", "mdview:0")
+                tmux("select-window", "-t", "fumi:0")
                 session.pump(.2)
                 assert PLACEHOLDER.encode() in session.data[since:]
-                tmux("kill-window", "-t", "mdview:1")
-                tmux("kill-pane", "-t", "mdview:0.1")
+                tmux("kill-window", "-t", "fumi:1")
+                tmux("kill-pane", "-t", "fumi:0.1")
                 session.pump(.3)
-                tmux("send-keys", "-t", "mdview:0.0", "-l", "?")
+                tmux("send-keys", "-t", "fumi:0.0", "-l", "?")
                 session.pump(.1)
-                assert PLACEHOLDER not in tmux("capture-pane", "-p", "-t", "mdview:0.0")
-                tmux("send-keys", "-t", "mdview:0.0", "-l", "q")
+                assert PLACEHOLDER not in tmux("capture-pane", "-p", "-t", "fumi:0.0")
+                tmux("send-keys", "-t", "fumi:0.0", "-l", "q")
                 session.pump(.2)
-                pane_pid = int(tmux("display-message", "-p", "-t", "mdview:0.0", "#{pane_pid}"))
-                tmux("send-keys", "-t", "mdview:0.0", "C-z")
+                pane_pid = int(tmux("display-message", "-p", "-t", "fumi:0.0", "#{pane_pid}"))
+                tmux("send-keys", "-t", "fumi:0.0", "C-z")
                 session.pump(.1)
                 os.kill(pane_pid, signal.SIGCONT)
                 session.pump(.4)
-                assert PLACEHOLDER in tmux("capture-pane", "-p", "-t", "mdview:0.0")
+                assert PLACEHOLDER in tmux("capture-pane", "-p", "-t", "fumi:0.0")
             if not rich:
                 assert not any(f.get(b"a") == b"t" for f, _ in commands(session))
                 assert PLACEHOLDER.encode() not in session.data
-            tmux("send-keys", "-t", "mdview:0.0", "-l", "q")
+            tmux("send-keys", "-t", "fumi:0.0", "-l", "q")
             session.wait(0)
             if rich:
                 all_commands = commands(session)

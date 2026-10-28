@@ -15,7 +15,7 @@ use ratatui::{
 use crate::search::{self, Search, Segment};
 use unicode_segmentation::UnicodeSegmentation;
 
-pub const HELP: &str = "# mdview 操作一覧\n\n読み取り専用Markdownビューア（v1）\n\nj / ↓ : 1表示行下\nk / ↑ : 1表示行上\nCtrl+d / Ctrl+u : 半画面下 / 上\nCtrl+f / PageDown : 1画面下（1行重複）\nCtrl+b / PageUp : 1画面上（1行重複）\ngg / Home : 先頭\nG / End : 末尾\n? : ヘルプを開閉\nq / Esc : 通常閲覧を終了、ヘルプから本文へ戻る\n/ : 検索入力（最大256書記素）\nn / N : 次 / 前の一致（循環）\nホイール : 3表示行上下\n検索中 Enter : 確定、Esc / Ctrl+c : 取消\n検索中 Backspace : 1書記素削除、Ctrl+u : 全消去\nCtrl+c : 割り込み終了（130）\nCtrl+z : 中断、fgで復帰\n\nヘルプでも移動できます。本文位置は変わりません。\nサイズ不足中はq / Ctrl+cで終了できます。\n\n--plain : 能力照会や画像を使わないテキストTUI\n--color auto|always|never : 色の指定\n--graphics auto|off|kitty : 数式画像の方式\n\n対応端末のブロック数式は画像、それ以外はTeXソースを表示します。\nMarkdown画像は代替テキストと参照先を表示します。\nリンクを開く操作はありません。";
+pub const HELP: &str = "# fumi 操作一覧\n\n読み取り専用Markdownビューア（v1）\n\nj / ↓ : 1表示行下\nk / ↑ : 1表示行上\nCtrl+d / Ctrl+u : 半画面下 / 上\nCtrl+f / PageDown : 1画面下（1行重複）\nCtrl+b / PageUp : 1画面上（1行重複）\ngg / Home : 先頭\nG / End : 末尾\n? : ヘルプを開閉\nq / Esc : 通常閲覧を終了、ヘルプから本文へ戻る\n/ : 検索入力（最大256書記素）\nn / N : 次 / 前の一致（循環）\nホイール : 3表示行上下\n検索中 Enter : 確定、Esc / Ctrl+c : 取消\n検索中 Backspace : 1書記素削除、Ctrl+u : 全消去\nCtrl+c : 割り込み終了（130）\nCtrl+z : 中断、fgで復帰\n\nヘルプでも移動できます。本文位置は変わりません。\nサイズ不足中はq / Ctrl+cで終了できます。\n\n--plain : 能力照会や画像を使わないテキストTUI\n--color auto|always|never : 色の指定\n--graphics auto|off|kitty : 数式画像の方式\n\n対応端末のブロック数式は画像、それ以外はTeXソースを表示します。\nMarkdown画像は代替テキストと参照先を表示します。\nリンクを開く操作はありません。";
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Action {

@@ -195,9 +195,9 @@ impl Document {
             transformed.push_str(&source[previous..range.start]);
             let start = transformed.len();
             if block {
-                transformed.push_str(&format!("```\nmdview-math-{idx}\n```"));
+                transformed.push_str(&format!("```\nfumi-math-{idx}\n```"));
             } else {
-                transformed.push_str(&format!("`mdview-math-{idx}`"));
+                transformed.push_str(&format!("`fumi-math-{idx}`"));
             }
             replacements.push(Replacement {
                 original: range.clone(),

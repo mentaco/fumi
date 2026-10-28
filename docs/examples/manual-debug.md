@@ -1,4 +1,4 @@
-# mdview v1 手動デバッグ
+# fumi v1 手動デバッグ
 
 この文書を最初は通常表示、続いてplain、色なしで開く。同じ端末・フォントで比較する。
 通常表示で画像能力・セル寸法・背景色を確認できた場合はKITTY、それ以外はTEXTになる。
@@ -76,7 +76,7 @@ plainまたはgraphics offでは、01の正常な式もTeXで読めること。
 
 ### 未知コマンド
 
-$$ \unknownmdview{x} $$
+$$ \unknownfumi{x} $$
 
 UNKNOWN_FORMULA_AFTER: この文章が表示されれば後続本文は保持されている。
 
@@ -235,7 +235,7 @@ def distance(x: float, y: float) -> float:
     return sqrt(x * x + y * y)
 ```
 
-```mdview-unknown-language
+```fumi-unknown-language
 未知の言語名はエラーにしない。
     先頭に4スペースがある。
 $code_dollars$ と **literal_stars** はコードのまま残る。

@@ -1,5 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use mdview::{
+use fumi::{
     app::{Action, App},
     cli::ColorMode,
     document::{Document, Kind, Node},
@@ -67,7 +67,7 @@ fn markdown_visible_content() {
         "[image] <https://example.com/image.png>",
         "┌",
         "(empty)",
-        "mdview",
+        "fumi",
         "日本語のMarkdown閲覧",
         "<div onclick=",
         "$x_i^2 + **literal**$",
@@ -384,7 +384,7 @@ fn representative_display_snapshots() {
     for width in [20, 40, 80, 120] {
         let actual = text(include_str!("fixtures/representative.md"), width) + "\n";
         let path = root.join(format!("representative-{width}.txt"));
-        if std::env::var_os("MDVIEW_UPDATE_SNAPSHOTS").is_some() {
+        if std::env::var_os("FUMI_UPDATE_SNAPSHOTS").is_some() {
             std::fs::create_dir_all(&root).unwrap();
             std::fs::write(&path, &actual).unwrap();
         }

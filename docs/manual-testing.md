@@ -10,7 +10,7 @@ MVPとv1の結果はそれぞれ[検証記録](verification.md)と[v1検証記�
 
 ```sh
 cargo build --release --locked
-./target/release/mdview tests/fixtures/representative.md
+./target/release/fumi tests/fixtures/representative.md
 ```
 
 最初は普段使っている端末で確認し、その後、利用できるTerminal.app・Ghostty・kitty等でも同じ操作を試してください。OS・端末・フォントの名称とバージョン、画面サイズ、tmux・SSHの有無を記録します。
@@ -32,10 +32,10 @@ cargo build --release --locked
 色・plainの比較用コマンドです。それぞれ終了してから次を起動してください。
 
 ```sh
-./target/release/mdview --plain tests/fixtures/representative.md
-./target/release/mdview --color never tests/fixtures/representative.md
-env NO_COLOR=1 ./target/release/mdview --color auto tests/fixtures/representative.md
-env NO_COLOR=1 ./target/release/mdview --color always tests/fixtures/representative.md
+./target/release/fumi --plain tests/fixtures/representative.md
+./target/release/fumi --color never tests/fixtures/representative.md
+env NO_COLOR=1 ./target/release/fumi --color auto tests/fixtures/representative.md
+env NO_COLOR=1 ./target/release/fumi --color always tests/fixtures/representative.md
 ```
 
 検索、マウスホイール、数式画像化、コードハイライトは下記のv1確認で扱います。Markdown画像の実画像表示は未実装です。
@@ -45,10 +45,10 @@ env NO_COLOR=1 ./target/release/mdview --color always tests/fixtures/representat
 [手動確認用Markdown](examples/manual-debug.md)には数式・検索・表・コードの確認例があります。リポジトリのルートから開けます。結果はOS・端末・フォント・画面サイズとともに記録してください。
 
 ```sh
-./target/release/mdview docs/examples/manual-debug.md
-./target/release/mdview --plain --graphics kitty docs/examples/manual-debug.md
-./target/release/mdview --graphics off docs/examples/manual-debug.md
-./target/release/mdview --color never docs/examples/manual-debug.md
+./target/release/fumi docs/examples/manual-debug.md
+./target/release/fumi --plain --graphics kitty docs/examples/manual-debug.md
+./target/release/fumi --graphics off docs/examples/manual-debug.md
+./target/release/fumi --color never docs/examples/manual-debug.md
 ```
 
 - [ ] `/hello world`、`/日本語`、`/frac`で確定・0件・空入力再利用・`n/N`の循環・反転と下線を確認する。同じ行の一致も別々に数える。
@@ -59,7 +59,7 @@ env NO_COLOR=1 ./target/release/mdview --color always tests/fixtures/representat
 - [ ] Kitty/GhosttyでKITTYになり、分数・根号・総和・積分・ギリシャ文字・pmatrix（丸括弧）・bmatrix（角括弧）・alignedが画像になる。未知コマンドだけTeXと理由へ戻る。
 - [ ] 数式の途中を上端・下端へ出す、j/kを連打、検索ジャンプ、ヘルプ開閉、リサイズ、Ctrl+z/fgを試す。残像・重複・ステータスへの侵入がなく、画像途中の行位置を保持する。
 - [ ] plain/off・非対応端末・tmux自動設定失敗・screen・背景色不明ではTeXを読める。生成中にqで速やかに終了し、画像・raw mode・カーソル・マウスが復旧する。
-- [ ] Unicodeプレースホルダー対応端末上のtmux（RGB色を保持）で、手動のパススルー設定なしで起動し、対象ペインだけ`allow-passthrough all`となり数式画像が見える。plain/off・数式なしでは設定を変更しない。上下クリッピング、ヘルプ、検索、ペイン分割・移動・ズーム・リサイズ、ウィンドウ切替と復帰を試し、ステータスや別ペインに残像がないことを確認する。別ペインにフォーカスしたままサイズを変えた後も画像が戻る。二つのmdviewを同時に開き、片方の終了が他方の画像を消さないことも確認する。
+- [ ] Unicodeプレースホルダー対応端末上のtmux（RGB色を保持）で、手動のパススルー設定なしで起動し、対象ペインだけ`allow-passthrough all`となり数式画像が見える。plain/off・数式なしでは設定を変更しない。上下クリッピング、ヘルプ、検索、ペイン分割・移動・ズーム・リサイズ、ウィンドウ切替と復帰を試し、ステータスや別ペインに残像がないことを確認する。別ペインにフォーカスしたままサイズを変えた後も画像が戻る。二つのfumiを同時に開き、片方の終了が他方の画像を消さないことも確認する。
 - [ ] 同一条件で初回と再実行、SSHでの直接転送、Linuxを別々に記録する。MVP時点の手動確認をv1の合格へ流用しない。
 
 ## 結果の記録

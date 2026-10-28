@@ -28,7 +28,7 @@ impl ColorMode {
 }
 
 #[derive(Debug, Parser)]
-#[command(name = "mdview", version, about = "読み取り専用Markdownビューア", color = clap::ColorChoice::Never)]
+#[command(name = "fumi", version, about = "読み取り専用Markdownビューア", color = clap::ColorChoice::Never)]
 pub struct Cli {
     /// 画像・数式画像化・拡大文字・能力照会を無効にする
     #[arg(long)]

@@ -1,5 +1,5 @@
 use clap::Parser;
-use mdview::{
+use fumi::{
     app::App,
     cli::Cli,
     document::Document,
@@ -15,7 +15,7 @@ use std::{
 fn error(target: &str, message: &str, code: u8) -> ExitCode {
     let _ = writeln!(
         io::stderr(),
-        "mdview: {}: {}",
+        "fumi: {}: {}",
         sanitize(target),
         sanitize(message)
     );
@@ -23,9 +23,8 @@ fn error(target: &str, message: &str, code: u8) -> ExitCode {
 }
 
 fn main() -> ExitCode {
-    if std::env::var_os("MDVIEW_INTERNAL_MATH_WORKER").as_deref() == Some(std::ffi::OsStr::new("1"))
-    {
-        return ExitCode::from(mdview::math::worker());
+    if std::env::var_os("FUMI_INTERNAL_MATH_WORKER").as_deref() == Some(std::ffi::OsStr::new("1")) {
+        return ExitCode::from(fumi::math::worker());
     }
     profile::start();
     let cli = match Cli::try_parse() {
@@ -40,7 +39,7 @@ fn main() -> ExitCode {
                 .collect::<Vec<_>>()
                 .join("\n");
             if e.use_stderr() {
-                let _ = writeln!(io::stderr(), "mdview: 引数: {text}");
+                let _ = writeln!(io::stderr(), "fumi: 引数: {text}");
             } else {
                 let _ = write!(io::stdout(), "{text}");
             }

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """macOS/LinuxのPTYで起動・入力・リサイズ・シグナル・端末属性復旧を検証する。
 
-実行: rtk proxy python3 tests/pty_smoke.py target/debug/mdview
+実行: rtk proxy python3 tests/pty_smoke.py target/debug/fumi
 GUI端末・フォントの互換性を検証するものではない。
 """
 import errno
@@ -19,7 +19,7 @@ import tempfile
 import termios
 import time
 
-BINARY = str(Path(sys.argv[1] if len(sys.argv) > 1 else "target/debug/mdview").resolve())
+BINARY = str(Path(sys.argv[1] if len(sys.argv) > 1 else "target/debug/fumi").resolve())
 FIXTURE = Path(__file__).parent / "fixtures/representative.md"
 
 
@@ -316,13 +316,13 @@ def color_modes():
 
 def restoration_faults():
     # cargo testで作成されたlibテスト実行ファイルを選ぶ。
-    for candidate in sorted(Path(BINARY).parent.joinpath("deps").glob("mdview-*"), key=lambda path: path.stat().st_mtime, reverse=True):
+    for candidate in sorted(Path(BINARY).parent.joinpath("deps").glob("fumi-*"), key=lambda path: path.stat().st_mtime, reverse=True):
         if not candidate.is_file() or not os.access(candidate, os.X_OK):
             continue
         listed = subprocess.run([str(candidate), "--list"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         if b"terminal::tests::restoration_fault_probe" in listed.stdout:
             for scenario in ["0", "8", "panic"]:
-                session = Session(["--ignored", "--exact", "terminal::tests::restoration_fault_probe", "--nocapture"], binary=str(candidate), extra_env={"MDVIEW_FAULT_PROBE": scenario})
+                session = Session(["--ignored", "--exact", "terminal::tests::restoration_fault_probe", "--nocapture"], binary=str(candidate), extra_env={"FUMI_FAULT_PROBE": scenario})
                 try:
                     session.wait(0)
                     assert b"RESTORATION_PROBE_OK" in session.data

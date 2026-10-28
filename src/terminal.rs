@@ -307,7 +307,7 @@ mod tests {
     fn restoration_fault_probe() {
         assert!(std::io::IsTerminal::is_terminal(&io::stdin()));
         install_panic_hook();
-        match std::env::var("MDVIEW_FAULT_PROBE").unwrap().as_str() {
+        match std::env::var("FUMI_FAULT_PROBE").unwrap().as_str() {
             "0" => assert!(Guard::enter_with(FailAfter(0)).is_err()),
             "8" => assert!(Guard::enter_with(FailAfter(8)).is_err()),
             "panic" => assert!(

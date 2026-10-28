@@ -1,15 +1,15 @@
-# mdview — ターミナル向けリッチMarkdownビューア 仕様案
+# fumi — ターミナル向けリッチMarkdownビューア 仕様案
 
 > ステータス: Draft 0.3 / v1機能実装済み。環境別の受け入れ・配布確認は継続中\
-> 更新日: 2026-10-26\
-> ツール名 `mdview` は仮称。仕様の「採用」と実装・検証の実績は区別する。現在の範囲は[v1検証記録](docs/v1-verification.md)、MVP時点の履歴は[MVP検証記録](docs/verification.md)、使い方は[ドキュメント一覧](docs/README.md)を参照。
+> 更新日: 2026-10-28\
+> ツール名・コマンド名は `fumi`（2026-10-28決定、旧仮称 `mdview`）。仕様の「採用」と実装・検証の実績は区別する。現在の範囲は[v1検証記録](docs/v1-verification.md)、MVP時点の履歴は[MVP検証記録](docs/verification.md)、使い方は[ドキュメント一覧](docs/README.md)を参照。
 
 ## 1. 目的と設計判断
 
-`mdview` は、macOSとLinuxのターミナル上でMarkdownを読むための、読み取り専用CLI/TUIツール。
+`fumi` は、macOSとLinuxのターミナル上でMarkdownを読むための、読み取り専用CLI/TUIツール。
 
 ```sh
-mdview README.md
+fumi README.md
 ```
 
 主な利用者は、ターミナル中心で作業し、README・設計メモ・数式を含む研究メモをVim風操作で読みたい人とする。成功の基準は、コマンド一つで開き、日本語を含む本文を読み進められ、終了後に元のターミナルへ戻れること。対応端末では、ブロック数式と画像も本文と一緒に読めるようにする。
@@ -58,7 +58,7 @@ Draft 0.1から、ステータス・ヘルプ・互換表示をMVPへ移した�
 ### 2.1 MVPのコマンド
 
 ```text
-mdview [OPTIONS] <FILE>
+fumi [OPTIONS] <FILE>
 
 Options:
       --plain                 画像・数式画像化・拡大文字・能力照会を無効にする
@@ -69,16 +69,16 @@ Options:
 ```
 
 ```sh
-mdview README.md
-mdview --plain notes/research.md
-mdview --color never README.md
-mdview -- -memo.md
+fumi README.md
+fumi --plain notes/research.md
+fumi --color never README.md
+fumi -- -memo.md
 ```
 
 - `FILE` は必須で一つだけ。省略・複数指定・未知のオプションは使用法エラー。
 - 拡張子では制限しない。相対パスは起動時の作業ディレクトリを基準に解決する。
 - MVP/v1では `-` を標準入力の予約値として扱い、未対応の説明とともにエラーにする。実ファイル名が `-` の場合は `./-` を指定する。
-- stdinとstdoutの両方がTTYであることを要求する。`mdview file.md > out.txt` や `cat file.md | mdview` はTUIを起動せずエラーにする。stderrをリダイレクトすることは許可する。
+- stdinとstdoutの両方がTTYであることを要求する。`fumi file.md > out.txt` や `cat file.md | fumi` はTUIを起動せずエラーにする。stderrをリダイレクトすることは許可する。
 - `--help` / `--version` はTTY・ファイルを必要とせずstdoutへ出力する。引数の構文検証後、TTY確認、ファイル読込の順で起動条件を確認する。
 - `TERM` が未設定・空・`dumb` の場合はTUIを起動せず、端末要件を満たさないエラーにする。
 
@@ -101,12 +101,12 @@ mdview -- -memo.md
 | `130` | 割り込み | `Ctrl+c` / SIGINT |
 | `143` | 終了要求 | SIGTERM |
 
-起動エラーはstderrに `mdview: <対象>: <原因>` の形式で一行以上出力する。通常終了時に本文をstdoutへ書き出さない。TUI中の致命的エラーは端末を復旧してからstderrへ出す。
+起動エラーはstderrに `fumi: <対象>: <原因>` の形式で一行以上出力する。通常終了時に本文をstdoutへ書き出さない。TUI中の致命的エラーは端末を復旧してからstderrへ出す。
 
 ### 2.4 後続バージョンのCLI
 
 - v1: `--graphics <auto|off|kitty>` を追加。既定は `auto`。`off` は画像だけを無効にする。`kitty` は検証済みのプロトコルを手動選択するための指定で、表示成功を保証しない。`--plain` と併用時は `--plain` を優先し、画像と拡大文字の両方を無効にする。
-- v2: `mdview -` でUTF-8の標準入力をEOFまで読み、stdoutと `/dev/tty` が利用可能ならTUIを起動する。キー入力は `/dev/tty` から読む。ファイル引数なしの暗黙stdin読込は導入しない。
+- v2: `fumi -` でUTF-8の標準入力をEOFまで読み、stdoutと `/dev/tty` が利用可能ならTUIを起動する。キー入力は `/dev/tty` から読む。ファイル引数なしの暗黙stdin読込は導入しない。
 - v2: stdinの表示名は `[stdin]`、相対画像パスの基準は起動時の作業ディレクトリ。読込中の割り込み・32 MiB上限もファイルと同様に扱う。
 - v2: `--watch` を追加。ファイル入力のみ許可し、stdinとの併用は使用法エラーにする。既定は監視しない。
 - 未提供の機能のオプションは、そのリリースでは未知のオプションとして拒否する。
@@ -246,7 +246,7 @@ MVPは表を行ごとの縦形式に変換する。
 
 ```text
 [row 1]
-名前: mdview
+名前: fumi
 用途: Markdown閲覧
 
 [row 2]
@@ -432,7 +432,7 @@ Parser → Document（ブロック・インライン・ソース範囲）
 
 測定時はCPU・OS・端末・文書fixture・キャッシュ状態を記録する。日本語混在、単一の長い段落、巨大な表、数式多数を別fixtureにし、通常文書の目標を満たしていても退行を確認する。
 
-開発用の`startup-profile` featureでは、読込・解析・レイアウト・初回描画を分け、最初の本文フレームのflush直後に計時する。計測先は`MDVIEW_PROFILE`で明示する。通常ビルドではこの計測・ファイル出力を無効にする。実行ファイルの起動から`main`到達までの時間とアプリ内部の時間は分け、内部だけの改善を初回表示目標の達成と扱わない。
+開発用の`startup-profile` featureでは、読込・解析・レイアウト・初回描画を分け、最初の本文フレームのflush直後に計時する。計測先は`FUMI_PROFILE`で明示する。通常ビルドではこの計測・ファイル出力を無効にする。実行ファイルの起動から`main`到達までの時間とアプリ内部の時間は分け、内部だけの改善を初回表示目標の達成と扱わない。
 
 ### 10.2 障害の区別
 
@@ -492,7 +492,7 @@ stdin入力、atomic save、監視中の削除／復旧、不正UTF-8への更�
 
 | 判断事項 | 現時点の扱い | 決める時点／必要な根拠 |
 |---|---|---|
-| 正式なコマンド名 | `mdview` を仮使用 | 最初の公開配布前に既存コマンド・配布名との衝突を確認 |
+| 正式なコマンド名 | `fumi` を採用（2026-10-28、所有者が決定） | 製品名・Cargoパッケージ名・実行ファイル名を統一。既存コマンド・配布名との衝突確認は公開配布前の継続課題 |
 | 数式レンダラーと画像化方式 | RaTeX 0.1.15＋同梱KaTeXフォント→PNG、Kitty直接転送を実装 | macOS arm64でPNGとPTY転送を確認。2026-10-26に表示修正後のユーザー手動確認OKとの報告を受領。今回の環境詳細は未共有 |
 | Ghostty/kittyの有効化条件 | 能力照会＋実機検証 | v1公開前。端末バージョンとクリッピング検証を記録 |
 | tmux内の数式画像 | DCSパススルー＋Unicodeプレースホルダー。RGB保持を前提に、対象ペインの`allow-passthrough all`を自動設定 | 手動設定なしで利用できるようにする。直接配置だけではペイン切替に追従できないため。tmux 3.8＋端末応答エミュレータで検証。GUI画像の目視確認は残る |
@@ -535,7 +535,7 @@ stdin入力、atomic save、監視中の削除／復旧、不正UTF-8への更�
 ### 12.6 tmux内の数式画像（2026-10-26）
 
 - テキストへの一律フォールバックから、8.1節の条件を満たしたtmuxで画像表示する方針へ変更した。画像データ・仮想配置・所有ID削除はDCSパススルー、位置と上下クリッピングは通常本文と同じratatuiセルで管理する。ウィンドウ切替やペイン移動で絶対座標へ画像を残さないため。
-- 複数のmdviewが同じ端末を共有する場合の衝突を減らすため、画像IDの開始値をプロセスごとにランダム化した。公式の行・列結合文字表を同梱し、画像IDの全32ビットをセルへ符号化する。
+- 複数のfumiが同じ端末を共有する場合の衝突を減らすため、画像IDの開始値をプロセスごとにランダム化した。公式の行・列結合文字表を同梱し、画像IDの全32ビットをセルへ符号化する。
 - 初回の仮想配置照会と、リサイズ時に画像対応の確認結果を維持する処理を実装した。後続の端末画像応答はquiet指定で抑止する。初回起動・中断復帰は対象ペインをアクティブにする前提とし、入れ子や複数クライアントの対応範囲は広げない。
 - 手動設定を不要にするため、パススルー有効化を対象ペインの自動設定へ変更した。Yaziと同じ`allow-passthrough all`をペイン単位で使う。plain/offや画像化対象のない文書では実行せず、失敗時は画像照会を送らずTeX表示へ戻す。設定はペインへ残し、グローバル設定や設定ファイルを変更しない。
 - macOS arm64のRust・PTY検証と、tmux 3.8＋応答エミュレータを使う独立サーバーでの統合検証を実施した。GUI端末で実際に数式画像が描画されること、Linux、他tmuxバージョンは未確認。[検証記録](docs/v1-verification.md)を参照。
@@ -545,7 +545,7 @@ stdin入力、atomic save、監視中の削除／復旧、不正UTF-8への更�
 以下は仕様策定時に確認した一次資料。ライブラリや端末の資料は更新されるため、実装時に採用するバージョンで再確認する。
 
 - [CommonMark 0.31.2](https://spec.commonmark.org/0.31.2/): 基本Markdownの解釈基準。
-- [pulldown-cmark Options](https://docs.rs/pulldown-cmark/latest/pulldown_cmark/struct.Options.html): 個別拡張と数式イベント。mdview固有の区切り条件は本仕様を優先。
+- [pulldown-cmark Options](https://docs.rs/pulldown-cmark/latest/pulldown_cmark/struct.Options.html): 個別拡張と数式イベント。fumi固有の区切り条件は本仕様を優先。
 - [Kitty Graphics Protocol](https://sw.kovidgoyal.net/kitty/graphics-protocol/): 能力照会、転送、配置、削除を検討する基準。
 - [Unicode placeholders](https://sw.kovidgoyal.net/kitty/graphics-protocol/#unicode-placeholders)、[tmux manual](https://github.com/tmux/tmux/blob/master/tmux.1): tmuxの仮想配置と`allow-passthrough`の実装基準。
 - [Text Sizing Protocol](https://sw.kovidgoyal.net/kitty/text-sizing-protocol/): 拡大文字の独立した検証対象。

@@ -1,7 +1,7 @@
 use std::process::Command;
 
 fn run(args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_mdview"))
+    Command::new(env!("CARGO_BIN_EXE_fumi"))
         .args(args)
         .output()
         .unwrap()
@@ -13,7 +13,7 @@ fn help_and_version_do_not_need_tty_or_file() {
         let output = run(&[arg]);
         assert!(output.status.success());
         assert!(output.stderr.is_empty());
-        assert!(String::from_utf8_lossy(&output.stdout).contains("mdview"));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("fumi"));
         assert!(!output.stdout.contains(&0x1b));
     }
 }

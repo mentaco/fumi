@@ -11,7 +11,7 @@
 
 ```sh
 cargo build --locked
-./target/debug/mdview tests/fixtures/v1.md
+./target/debug/fumi tests/fixtures/v1.md
 ```
 
 ## 構成と変更方針
@@ -37,9 +37,9 @@ cargo fmt --all -- --check
 cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-targets --all-features
 cargo build --locked
-python3 tests/pty_smoke.py target/debug/mdview
-python3 tests/pty_v1.py target/debug/mdview
-python3 tests/pty_tmux.py target/debug/mdview
+python3 tests/pty_smoke.py target/debug/fumi
+python3 tests/pty_v1.py target/debug/fumi
+python3 tests/pty_tmux.py target/debug/fumi
 ```
 
 PTYは対話セッションを再現し、正常終了・割り込み・中断再開・端末属性の復旧を検証します。通常の`cargo test`で無視される端末故障注入テストは`pty_smoke.py`が専用プロセスで実行します。`pty_tmux.py`は一時ソケットと専用設定で独立したサーバーを作り、既存セッションを変更しません。
@@ -49,7 +49,7 @@ Kitty応答はエミュレータによるもので、実端末の画像描画の
 意図的にスナップショットを更新する場合は次を実行し、差分を確認します。
 
 ```sh
-env MDVIEW_UPDATE_SNAPSHOTS=1 cargo test --locked --test core representative_display_snapshots
+env FUMI_UPDATE_SNAPSHOTS=1 cargo test --locked --test core representative_display_snapshots
 ```
 
 文書のみの変更では、ローカルリンク、Markdown構造、仕様と実装の整合を確認します。コードのテストは関連する変更がある場合に実施します。
@@ -58,7 +58,7 @@ env MDVIEW_UPDATE_SNAPSHOTS=1 cargo test --locked --test core representative_dis
 
 ```sh
 cargo build --release --locked --features startup-profile
-python3 tests/pty_v1_bench.py target/release/mdview
+python3 tests/pty_v1_bench.py target/release/fumi
 ```
 
 `startup-profile`は任意の開発用featureです。通常ビルドでは計測しません。MVPの内訳計測は[性能調査](docs/performance.md#再現手順)、v1の条件と結果は[v1検証記録](docs/v1-verification.md#性能)を参照してください。測定中は別のビルドやベンチマークを並行実行せず、初回と再実行を分けて記録します。
@@ -68,7 +68,7 @@ python3 tests/pty_v1_bench.py target/release/mdview
 GitHubのIssueに、共有できる最小のMarkdownと次の情報を記載してください。個人情報・認証情報を含む文書やログは添付しないでください。
 
 ```text
-コミットまたはmdview --version:
+コミットまたはfumi --version:
 OS / CPU:
 端末名・バージョン:
 フォント名・サイズ:

@@ -37,7 +37,7 @@ with tempfile.TemporaryDirectory() as directory:
         for run in range(3):
             profile = Path(directory) / ("%s-%d.json" % (mode, run))
             started = time.monotonic()
-            session = Session((["--plain"] if mode == "plain" else []) + [fixture], size=(120,40), extra_env={"MDVIEW_PROFILE":str(profile)}, exec_clock_env="MDVIEW_PROFILE_EXEC_NS")
+            session = Session((["--plain"] if mode == "plain" else []) + [fixture], size=(120,40), extra_env={"FUMI_PROFILE":str(profile)}, exec_clock_env="FUMI_PROFILE_EXEC_NS")
             try:
                 frame(session)
                 startup = (time.monotonic() - started) * 1000

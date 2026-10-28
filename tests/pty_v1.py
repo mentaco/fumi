@@ -129,7 +129,7 @@ def graphics_lifecycle(tmux=False):
 
 
 def fallback(args, extra_env=None, reply=None):
-    log = Path(MOCK_TMUX_ENV["MDVIEW_TEST_TMUX_LOG"])
+    log = Path(MOCK_TMUX_ENV["FUMI_TEST_TMUX_LOG"])
     before = log.read_text() if log.exists() else ""
     session = Session(args + [V1], extra_env=mock_tmux_env(extra_env))
     try:
@@ -141,12 +141,12 @@ def fallback(args, extra_env=None, reply=None):
             assert b"a=q" not in session.data
         assert b"a=t" not in session.data
         session.send(b"G")
-        assert "unknownmdview" in session.visible()
+        assert "unknownfumi" in session.visible()
         session.send(b"q")
         session.wait(0)
         if "--plain" in args or "off" in args or not (extra_env and "TMUX" in extra_env):
             assert (log.read_text() if log.exists() else "") == before, "不要なtmux設定変更"
-        if extra_env and ("MDVIEW_TEST_TMUX_MODE" in extra_env or "TMUX_PANE" in extra_env or "PATH" in extra_env):
+        if extra_env and ("FUMI_TEST_TMUX_MODE" in extra_env or "TMUX_PANE" in extra_env or "PATH" in extra_env):
             assert b"a=q" not in session.data, "自動設定失敗後に画像照会"
     finally:
         session.close()
@@ -154,10 +154,10 @@ def fallback(args, extra_env=None, reply=None):
 
 def setup_failure(mode):
     start = time.monotonic()
-    fallback([], {"TMUX": "test", "MDVIEW_TEST_TMUX_MODE": mode})
+    fallback([], {"TMUX": "test", "FUMI_TEST_TMUX_MODE": mode})
     assert time.monotonic() - start < 2, "自動設定が閲覧を長時間ブロック"
     if mode == "hang":
-        pid = int(Path(MOCK_TMUX_ENV["MDVIEW_TEST_TMUX_LOG"] + ".pid").read_text())
+        pid = int(Path(MOCK_TMUX_ENV["FUMI_TEST_TMUX_LOG"] + ".pid").read_text())
         try:
             os.kill(pid, 0)
         except ProcessLookupError:
@@ -228,7 +228,7 @@ def run():
     case("tmux自動設定失敗", lambda: setup_failure("fail"))
     case("tmux自動設定タイムアウト・子プロセス回収", lambda: setup_failure("hang"))
     case("tmuxペインID不正", lambda: fallback([], {"TMUX": "test", "TMUX_PANE": "other:0"}))
-    case("tmuxコマンド未導入", lambda: fallback([], {"TMUX": "test", "PATH": "/nonexistent-mdview-test"}))
+    case("tmuxコマンド未導入", lambda: fallback([], {"TMUX": "test", "PATH": "/nonexistent-fumi-test"}))
     case("screen", lambda: fallback([], {"STY": "test"}))
     case("セル寸法不明", lambda: fallback([], reply={"cell": None}))
     case("不正な寸法応答", lambda: fallback([], reply={"cell": None, "malformed": True}))
@@ -239,12 +239,12 @@ def run():
 
 
 if __name__ == "__main__":
-    with tempfile.TemporaryDirectory(prefix="mdview-mock-tmux-") as directory:
+    with tempfile.TemporaryDirectory(prefix="fumi-mock-tmux-") as directory:
         executable = Path(directory) / "tmux"
         executable.write_text('''#!/bin/sh
-printf '%s\n' "$*" >> "$MDVIEW_TEST_TMUX_LOG"
-printf '%s\n' "$$" > "$MDVIEW_TEST_TMUX_LOG.pid"
-case "$MDVIEW_TEST_TMUX_MODE" in
+printf '%s\n' "$*" >> "$FUMI_TEST_TMUX_LOG"
+printf '%s\n' "$$" > "$FUMI_TEST_TMUX_LOG.pid"
+case "$FUMI_TEST_TMUX_MODE" in
     fail) exit 1 ;;
     hang) exec /bin/sleep 10 ;;
 esac
@@ -254,8 +254,8 @@ exit 0
         MOCK_TMUX_ENV = {
             "PATH": directory + os.pathsep + os.environ.get("PATH", ""),
             "TMUX_PANE": "%42",
-            "MDVIEW_TEST_TMUX_LOG": str(Path(directory) / "calls"),
+            "FUMI_TEST_TMUX_LOG": str(Path(directory) / "calls"),
         }
         run()
-        calls = Path(MOCK_TMUX_ENV["MDVIEW_TEST_TMUX_LOG"]).read_text().splitlines()
+        calls = Path(MOCK_TMUX_ENV["FUMI_TEST_TMUX_LOG"]).read_text().splitlines()
         assert calls and all(call == "set-option -p -t %42 allow-passthrough all" for call in calls), calls

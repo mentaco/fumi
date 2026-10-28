@@ -1,5 +1,5 @@
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
-use mdview::{
+use fumi::{
     app::{Action, App},
     document::Document,
     input::{Decoder, InputEvent},
@@ -269,7 +269,7 @@ fn math_target_notation_generates_png_with_cell_sized_dimensions() {
         assert_eq!(image.height % 20, 0);
     }
     for tex in [
-        r"\unknownmdview{x}",
+        r"\unknownfumi{x}",
         r"\input{/etc/passwd}",
         r"\write18{touch nope}",
         r"\def\a{x}\a",

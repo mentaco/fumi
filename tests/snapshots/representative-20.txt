@@ -57,7 +57,7 @@ ple.org/reference>。
 mple.com/image.png>
 
 [row 1]
-名前: mdview
+名前: fumi
 用途:
 日本語のMarkdown閲覧
 (列3): (empty)

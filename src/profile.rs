@@ -23,10 +23,10 @@ mod enabled {
         };
         let clock_ok = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut clock) } == 0;
         let entry_ns = clock.tv_sec as u128 * 1_000_000_000 + clock.tv_nsec as u128;
-        if let Some(path) = std::env::var_os("MDVIEW_PROFILE") {
+        if let Some(path) = std::env::var_os("FUMI_PROFILE") {
             let mut stages = Vec::new();
             if clock_ok
-                && let Some(exec_ns) = std::env::var("MDVIEW_PROFILE_EXEC_NS")
+                && let Some(exec_ns) = std::env::var("FUMI_PROFILE_EXEC_NS")
                     .ok()
                     .and_then(|s| s.parse::<u128>().ok())
                 && let Some(elapsed) = entry_ns.checked_sub(exec_ns)

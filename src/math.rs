@@ -410,7 +410,7 @@ impl Manager {
 fn start_job(key: Request, _source: usize) -> io::Result<Job> {
     use std::os::fd::AsRawFd;
     let mut child = Command::new(std::env::current_exe()?)
-        .env("MDVIEW_INTERNAL_MATH_WORKER", "1")
+        .env("FUMI_INTERNAL_MATH_WORKER", "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
