@@ -1,6 +1,6 @@
 # 開発エージェント向けガイド
 
-開発手順は `CONTRIBUTING.md`、文書の入口は `docs/README.md` を参照する。
+文書の入口は `docs/README.md` を参照する。
 
 ## 適用範囲と仕様
 
