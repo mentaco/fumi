@@ -166,20 +166,20 @@ pub fn run(mut app: App, signals: &Signals, options: GraphicsOptions) -> io::Res
             dirty = true;
         }
         if let Some(manager) = &mut math {
-            let views = manager.update(&app);
+            let views = manager.update(&app.view_state());
             dirty |= app.set_math(views, Status::Pending);
         }
         if dirty && last_draw.elapsed() >= Duration::from_millis(16) {
             kitty.clear_placements(terminal.backend_mut())?;
-            let prepared = kitty.prepare(&app, terminal.backend_mut());
+            let prepared = kitty.prepare(&app.view_state(), terminal.backend_mut());
             if prepared.is_ok() {
                 terminal.draw(|f| {
                     app.draw(f);
-                    kitty.render_placeholders(&app, f);
+                    kitty.render_placeholders(&app.view_state(), f);
                 })?;
             }
             if prepared
-                .and_then(|()| kitty.draw(&app, terminal.backend_mut()))
+                .and_then(|()| kitty.draw(&app.view_state(), terminal.backend_mut()))
                 .is_err()
             {
                 disable_graphics(&mut app, &mut kitty, &mut math);

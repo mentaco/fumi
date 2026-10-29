@@ -1,5 +1,6 @@
 use crate::{
     document::Document,
+    graphics::ViewState,
     layout::{DisplayLine, Mapping, anchored_row, layout, search_segments, truncate_middle},
     math::{Status, View},
     search::{self, Search, Segment},
@@ -115,6 +116,21 @@ impl App {
         } else {
             self.width
         })
+    }
+    /// 本文の左端の列。40列以上では左右に1列ずつ余白を置く。
+    fn left_margin(&self) -> u16 {
+        u16::from(self.width >= 40)
+    }
+    pub fn view_state(&self) -> ViewState<'_> {
+        ViewState {
+            lines: &self.lines,
+            top: self.top,
+            rows: self.viewport(),
+            width: self.body_width(),
+            left: self.left_margin(),
+            body_visible: !self.help && !self.too_small(),
+            images: self.graphics_active.then_some(&self.math_views),
+        }
     }
     pub fn max_top(&self) -> usize {
         self.lines.len().saturating_sub(self.viewport())
@@ -657,8 +673,12 @@ impl App {
             );
             return;
         }
-        let margin = u16::from(self.width >= 40);
-        let body = Rect::new(margin, 0, self.body_width() as u16, self.height - 1);
+        let body = Rect::new(
+            self.left_margin(),
+            0,
+            self.body_width() as u16,
+            self.height - 1,
+        );
         let (lines, top) = if self.help {
             (&self.help_view.lines, self.help_view.top)
         } else {

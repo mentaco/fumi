@@ -1,8 +1,7 @@
 //! 数式は同じバイナリの隔離ワーカーで処理し、UI側で期限・世代・容量を管理する。
 use crate::{
-    app::App,
     document::Document,
-    graphics::{Capabilities, PLACEHOLDER_COLUMNS, Transport, luminance},
+    graphics::{Capabilities, PLACEHOLDER_COLUMNS, Transport, ViewState, luminance},
     layout::anchored_row,
 };
 use serde::{Deserialize, Serialize};
@@ -302,30 +301,32 @@ impl Manager {
             self.cache.pop_front();
         }
     }
-    pub fn update(&mut self, app: &App) -> HashMap<usize, View> {
-        let width = app.body_width();
-        let v = app.viewport();
-        let range = app.top.saturating_sub(v)..(app.top + v * 2).min(app.lines.len());
-        let wanted: Vec<_> = if app.help || app.too_small() {
+    pub fn update(&mut self, view: &ViewState) -> HashMap<usize, View> {
+        let width = view.width;
+        let v = view.rows;
+        let top = view.top;
+        let lines = view.lines;
+        let range = top.saturating_sub(v)..(top + v * 2).min(lines.len());
+        let wanted: Vec<_> = if !view.body_visible {
             Vec::new()
         } else {
             let mut formulas: Vec<_> = self
                 .formulas
                 .iter()
                 .filter_map(|(source, tex)| {
-                    if !app.lines[range.clone()].iter().any(|line| {
+                    if !lines[range.clone()].iter().any(|line| {
                         line.source.start < source.end && source.start <= line.source.end
                     }) {
                         return None;
                     }
-                    let row = anchored_row(&app.lines, source.start);
+                    let row = anchored_row(lines, source.start);
                     range.contains(&row).then(|| {
                         (
                             tex.clone(),
-                            if row >= app.top && row < app.top + v {
-                                (0, row - app.top)
+                            if row >= top && row < top + v {
+                                (0, row - top)
                             } else {
-                                (1, row.abs_diff(app.top))
+                                (1, row.abs_diff(top))
                             },
                         )
                     })
@@ -452,6 +453,7 @@ fn start_job(key: Request) -> io::Result<Job> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::App;
     fn capabilities() -> Capabilities {
         Capabilities {
             transport: Transport::Direct,
@@ -517,7 +519,7 @@ mod tests {
             libc::fcntl(fd, libc::F_SETFL, libc::O_NONBLOCK);
         }
         let start = Instant::now();
-        let views = manager.update(&app);
+        let views = manager.update(&app.view_state());
         assert!(start.elapsed() < Duration::from_secs(1));
         assert_eq!(manager.active_jobs(), 0);
         assert!(

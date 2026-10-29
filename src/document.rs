@@ -78,33 +78,69 @@ fn overlaps(ranges: &[Range<usize>], range: &Range<usize>) -> bool {
     ranges.get(idx).is_some_and(|r| r.start < range.end)
 }
 
+/// 数式の候補を絞り込むための通常パースの構造。範囲はすべてソースのバイト位置。
+struct Structure {
+    /// コード・HTML。数式の区切りとして扱わない。
+    forbidden: Vec<Range<usize>>,
+    /// リスト・引用・表。ブロック数式はこの中では認識しない。
+    containers: Vec<Range<usize>>,
+    /// Textイベント。インライン数式の区切りはこの中にだけ置ける。
+    text: Vec<Range<usize>>,
+}
+
+impl Structure {
+    fn scan(source: &str) -> Self {
+        let mut forbidden = Vec::new();
+        let mut containers = Vec::new();
+        let mut text = Vec::new();
+        for (event, range) in Parser::new_ext(source, options()).into_offset_iter() {
+            match event {
+                Event::Start(Tag::CodeBlock(_) | Tag::HtmlBlock)
+                | Event::Code(_)
+                | Event::Html(_)
+                | Event::InlineHtml(_) => forbidden.push(range),
+                Event::Start(Tag::List(_) | Tag::BlockQuote(_) | Tag::Table(_)) => {
+                    containers.push(range)
+                }
+                Event::Text(_) => text.push(range),
+                _ => {}
+            }
+        }
+        Self {
+            forbidden: merge_ranges(forbidden),
+            containers: merge_ranges(containers),
+            text,
+        }
+    }
+}
+
 /// 通常パースの構造を使い、コード・HTML・参照先を避けて数式を走査する。
 /// 数式だけを一時的なコード要素にし、数式内のMarkdown再解釈を防ぐ。
 fn math_ranges(source: &str) -> Vec<(Range<usize>, bool)> {
-    let mut forbidden = Vec::new();
-    let mut containers = Vec::new();
-    let mut text = Vec::new();
-    for (event, range) in Parser::new_ext(source, options()).into_offset_iter() {
-        match event {
-            Event::Start(Tag::CodeBlock(_) | Tag::HtmlBlock)
-            | Event::Code(_)
-            | Event::Html(_)
-            | Event::InlineHtml(_) => forbidden.push(range),
-            Event::Start(Tag::List(_) | Tag::BlockQuote(_) | Tag::Table(_)) => {
-                containers.push(range)
-            }
-            Event::Text(_) => text.push(range),
-            _ => {}
-        }
-    }
-    let mut forbidden = merge_ranges(forbidden);
-    let containers = merge_ranges(containers);
+    let structure = Structure::scan(source);
     let mut lines = Vec::new();
     let mut offset = 0;
     for line in source.split_inclusive('\n') {
         lines.push((offset, line.trim_end_matches('\n')));
         offset += line.len();
     }
+    let blocks = block_math(source, &lines, &structure);
+    // ブロック数式の内側にはインライン数式を探さない。
+    let mut forbidden = structure.forbidden;
+    forbidden.extend(blocks.iter().cloned());
+    let forbidden = merge_ranges(forbidden);
+    let mut found: Vec<_> = blocks.into_iter().map(|r| (r, true)).collect();
+    found.extend(
+        inline_math(source, &lines, &structure.text, &forbidden)
+            .into_iter()
+            .map(|r| (r, false)),
+    );
+    found.sort_by_key(|(r, _)| r.start);
+    found
+}
+
+/// 前後を空行で区切られ、コンテナ外にある `$$` 行で囲まれた範囲。
+fn block_math(source: &str, lines: &[(usize, &str)], structure: &Structure) -> Vec<Range<usize>> {
     let mut found = Vec::new();
     let mut i = 0;
     while i < lines.len() {
@@ -134,12 +170,12 @@ fn math_ranges(source: &str) -> Vec<(Range<usize>, bool)> {
             }
             if let Some(j) = end_line {
                 let end = lines[j].0 + lines[j].1.len();
-                let range = start..end;
+                let first_line = start..start + line.len();
                 if (j + 1 == lines.len() || lines[j + 1].1.trim().is_empty())
-                    && !overlaps(&forbidden, &(start..start + line.len()))
-                    && !overlaps(&containers, &(start..start + line.len()))
+                    && !overlaps(&structure.forbidden, &first_line)
+                    && !overlaps(&structure.containers, &first_line)
                 {
-                    found.push((range, true));
+                    found.push(start..end);
                     i = j + 1;
                     continue;
                 }
@@ -147,22 +183,31 @@ fn math_ranges(source: &str) -> Vec<(Range<usize>, bool)> {
         }
         i += 1;
     }
+    found
+}
+
+/// 同じ行の中で対になる単独の `$`。
+fn inline_math(
+    source: &str,
+    lines: &[(usize, &str)],
+    text: &[Range<usize>],
+    forbidden: &[Range<usize>],
+) -> Vec<Range<usize>> {
     // Textイベントの範囲に区切りがあることを要求するため、URL内等は候補にならない。
     let eligible = |at: usize| {
         let idx = text.partition_point(|r| r.end <= at);
         text.get(idx).is_some_and(|r| r.contains(&at))
     };
-    forbidden.extend(found.iter().map(|(r, _)| r.clone()));
-    let forbidden = merge_ranges(forbidden);
     let bytes = source.as_bytes();
-    for (start, line) in lines {
+    let mut found = Vec::new();
+    for &(start, line) in lines {
         let end = start + line.len();
         let mut opening = None;
         for p in start..end {
             if !single_dollar(bytes, p) || !eligible(p) {
                 continue;
             }
-            if opening.is_some_and(|o| overlaps(&forbidden, &(o..p + 1))) {
+            if opening.is_some_and(|o| overlaps(forbidden, &(o..p + 1))) {
                 opening = None;
             }
             if let Some(o) = opening
@@ -172,10 +217,10 @@ fn math_ranges(source: &str) -> Vec<(Range<usize>, bool)> {
                     .is_some_and(|c| !c.is_whitespace())
                 && !bytes.get(p + 1).is_some_and(u8::is_ascii_digit)
             {
-                found.push((o..p + 1, false));
+                found.push(o..p + 1);
                 opening = None;
             } else if opening.is_none()
-                && !overlaps(&forbidden, &(p..p + 1))
+                && !overlaps(forbidden, &(p..p + 1))
                 && source[p + 1..end]
                     .chars()
                     .next()
@@ -185,7 +230,6 @@ fn math_ranges(source: &str) -> Vec<(Range<usize>, bool)> {
             }
         }
     }
-    found.sort_by_key(|(r, _)| r.start);
     found
 }
 

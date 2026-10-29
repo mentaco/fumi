@@ -1,7 +1,7 @@
 use crate::{
-    app::App,
     cli::GraphicsMode,
     input::{self, Decoder, InputEvent},
+    layout::DisplayLine,
     math::{Image, View},
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -346,6 +346,33 @@ fn release_image(id: u32, transport: Transport, output: &mut impl Write) -> io::
     Ok(())
 }
 
+/// 画像処理が参照する本文の表示状態。UIの状態全体には依存しない。
+#[derive(Clone, Copy)]
+pub struct ViewState<'a> {
+    pub lines: &'a [DisplayLine],
+    pub top: usize,
+    /// 本文の表示行数。
+    pub rows: usize,
+    /// 本文の表示幅（セル）。
+    pub width: usize,
+    /// 本文の左端の列。
+    pub left: u16,
+    /// 本文を表示しているか。ヘルプ表示中とサイズ不足では偽。
+    pub body_visible: bool,
+    /// 画像表示が有効なときの数式の結果。
+    pub images: Option<&'a HashMap<usize, View>>,
+}
+impl<'a> ViewState<'a> {
+    /// 画面上に画像を置ける状態での数式の結果。
+    fn shown_images(&self) -> Option<&'a HashMap<usize, View>> {
+        self.images.filter(|_| self.body_visible)
+    }
+    /// 画面上の行番号と、その行に表示する本文の表示行。
+    fn screen_lines(&self) -> impl Iterator<Item = (usize, &'a DisplayLine)> + use<'a> {
+        self.lines.iter().skip(self.top).take(self.rows).enumerate()
+    }
+}
+
 pub struct Kitty {
     transport: Transport,
     transferred: HashMap<usize, (u32, Arc<Image>)>,
@@ -383,20 +410,20 @@ impl Kitty {
             .is_some_and(|(id, ok)| !ok && self.transferred.values().any(|(own, _)| *own == id))
     }
     /// 画像を先に転送する。Unicodeセルはratatuiの差分管理に含める。
-    pub fn prepare(&mut self, app: &App, output: &mut impl Write) -> io::Result<()> {
-        if app.help || app.too_small() || !app.graphics_active {
+    pub fn prepare(&mut self, view: &ViewState, output: &mut impl Write) -> io::Result<()> {
+        let Some(views) = view.shown_images() else {
             self.reset();
             return Ok(());
-        }
+        };
         let mut visible = HashSet::new();
-        for line in app.lines.iter().skip(app.top).take(app.viewport()) {
+        for (_, line) in view.screen_lines() {
             let Some((source, _)) = line.image else {
                 continue;
             };
             if !visible.insert(source) {
                 continue;
             }
-            let Some(View::Ready(image)) = app.math_views.get(&source) else {
+            let Some(View::Ready(image)) = views.get(&source) else {
                 continue;
             };
             if self
@@ -466,18 +493,11 @@ impl Kitty {
         }
         output.flush()
     }
-    pub fn render_placeholders(&self, app: &App, frame: &mut Frame) {
-        if self.transport != Transport::Tmux || app.help || app.too_small() || !app.graphics_active
-        {
+    pub fn render_placeholders(&self, view: &ViewState, frame: &mut Frame) {
+        if self.transport != Transport::Tmux || view.shown_images().is_none() {
             return;
         }
-        for (row, line) in app
-            .lines
-            .iter()
-            .skip(app.top)
-            .take(app.viewport())
-            .enumerate()
-        {
+        for (row, line) in view.screen_lines() {
             let Some((source, offset)) = line.image else {
                 continue;
             };
@@ -491,31 +511,23 @@ impl Kitty {
             let color = Color::Rgb((id >> 16) as u8, (id >> 8) as u8, *id as u8);
             for (column, &column_mark) in diacritics::DIACRITICS
                 .iter()
-                .take(image.columns.min(app.body_width()))
+                .take(image.columns.min(view.width))
                 .enumerate()
             {
                 let symbol = format!("\u{10eeee}{row_mark}{column_mark}{high}");
-                let cell = &mut frame.buffer_mut()
-                    [(column as u16 + u16::from(app.width >= 40), row as u16)];
+                let cell = &mut frame.buffer_mut()[(column as u16 + view.left, row as u16)];
                 cell.reset();
                 cell.set_symbol(&symbol).set_fg(color);
             }
         }
     }
     /// 直接接続時だけ、本文描画後のカーソル座標へ画像を配置する。
-    pub fn draw(&mut self, app: &App, output: &mut impl Write) -> io::Result<()> {
-        if self.transport == Transport::Tmux || app.help || app.too_small() || !app.graphics_active
-        {
+    pub fn draw(&mut self, view: &ViewState, output: &mut impl Write) -> io::Result<()> {
+        if self.transport == Transport::Tmux || view.shown_images().is_none() {
             return Ok(());
         }
         let mut visible = HashSet::new();
-        for (row, line) in app
-            .lines
-            .iter()
-            .enumerate()
-            .skip(app.top)
-            .take(app.viewport())
-        {
+        for (row, line) in view.screen_lines() {
             let Some((source, offset)) = line.image else {
                 continue;
             };
@@ -525,17 +537,9 @@ impl Kitty {
             let Some((id, image)) = self.transferred.get(&source) else {
                 continue;
             };
-            let remaining = image
-                .rows
-                .saturating_sub(offset)
-                .min(app.viewport() - (row - app.top));
+            let remaining = image.rows.saturating_sub(offset).min(view.rows - row);
             let cell_height = image.height as usize / image.rows;
-            write!(
-                output,
-                "\x1b[{};{}H",
-                row - app.top + 1,
-                if app.width >= 40 { 2 } else { 1 }
-            )?;
+            write!(output, "\x1b[{};{}H", row + 1, view.left + 1)?;
             self.transport.control(
                 output,
                 &format!(
@@ -556,7 +560,10 @@ impl Kitty {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::document::{Document, Kind};
+    use crate::{
+        app::App,
+        document::{Document, Kind},
+    };
     use ratatui::{Terminal, backend::TestBackend};
 
     #[test]
@@ -609,7 +616,7 @@ mod tests {
             terminal
                 .draw(|f| {
                     app.draw(f);
-                    kitty.render_placeholders(app, f);
+                    kitty.render_placeholders(&app.view_state(), f);
                 })
                 .unwrap()
                 .buffer
