@@ -32,13 +32,29 @@ pub(crate) struct LogicalLine {
     language: Option<String>,
 }
 
+/// 表示行・論理文字列のバイト範囲と、元のソースのバイト範囲の対応。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Mapping {
+    pub text: Range<usize>,
+    pub source: Range<usize>,
+}
+
+/// リンク・画像の参照先文字列の位置。参照先はソースと一対一に対応しないため、
+/// 要素の開始位置 `id` と参照先文字列内のバイト範囲 `target` で識別する。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Destination {
+    pub text: Range<usize>,
+    pub id: usize,
+    pub target: Range<usize>,
+}
+
 #[derive(Clone, Debug)]
 pub struct DisplayLine {
     pub line: Line<'static>,
     pub source: Range<usize>,
-    pub mappings: Vec<(Range<usize>, Range<usize>)>,
+    pub mappings: Vec<Mapping>,
     pub image: Option<(usize, usize)>,
-    pub destinations: Vec<(Range<usize>, usize, Range<usize>)>,
+    pub destinations: Vec<Destination>,
 }
 
 impl DisplayLine {
@@ -309,6 +325,24 @@ fn block(node: &Node, width: usize) -> Vec<LogicalLine> {
     }
 }
 
+/// 見出しセルの本文。空の見出しは `(列N)` のラベルで置き換える。
+fn header_runs(cell: &Node, index: usize, label_source: Range<usize>) -> Vec<Run> {
+    let mut runs = Vec::new();
+    inline(
+        &cell.children,
+        Style::default().add_modifier(Modifier::BOLD),
+        &mut runs,
+    );
+    if runs.iter().all(|r| r.text.trim().is_empty()) {
+        runs = vec![run(
+            format!("(列{})", index + 1),
+            Style::default(),
+            label_source,
+        )];
+    }
+    runs
+}
+
 fn grid_table(node: &Node, alignments: &[Alignment], width: usize) -> Option<Vec<LogicalLine>> {
     let mut rows: Vec<Vec<Vec<Run>>> = Vec::new();
     let mut sources = Vec::new();
@@ -319,26 +353,15 @@ fn grid_table(node: &Node, alignments: &[Alignment], width: usize) -> Option<Vec
         let header = rows.is_empty();
         let mut cells = Vec::new();
         for (i, cell) in row.children.iter().enumerate() {
+            let label_source = cell.source.start..cell.source.start;
+            if header {
+                cells.push(header_runs(cell, i, label_source));
+                continue;
+            }
             let mut runs = Vec::new();
-            inline(
-                &cell.children,
-                if header {
-                    Style::default().add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default()
-                },
-                &mut runs,
-            );
+            inline(&cell.children, Style::default(), &mut runs);
             if runs.iter().all(|r| r.text.trim().is_empty()) {
-                runs = vec![run(
-                    if header {
-                        format!("(列{})", i + 1)
-                    } else {
-                        "(empty)".into()
-                    },
-                    Style::default(),
-                    cell.source.start..cell.source.start,
-                )];
+                runs = vec![run("(empty)", Style::default(), label_source)];
             }
             cells.push(runs);
         }
@@ -451,20 +474,7 @@ fn table(node: &Node) -> Vec<LogicalLine> {
     for child in &node.children {
         if matches!(child.kind, Kind::Element(Tag::TableHead)) {
             for (idx, cell) in child.children.iter().enumerate() {
-                let mut runs = Vec::new();
-                inline(
-                    &cell.children,
-                    Style::default().add_modifier(Modifier::BOLD),
-                    &mut runs,
-                );
-                if runs.iter().all(|r| r.text.trim().is_empty()) {
-                    runs = vec![run(
-                        format!("(列{})", idx + 1),
-                        Style::default(),
-                        cell.source.clone(),
-                    )];
-                }
-                headers.push(runs);
+                headers.push(header_runs(cell, idx, cell.source.clone()));
             }
         } else if matches!(child.kind, Kind::Element(Tag::TableRow)) {
             rows.push(child);
@@ -655,149 +665,182 @@ pub fn layout(document: &Document, width: usize, colors: bool) -> Vec<DisplayLin
     let mut result = Vec::new();
     for line in logical {
         if line.rule {
-            let prefix = if line.prefix.width() + 4 <= width {
-                &line.prefix
-            } else {
-                ""
-            };
-            result.push(DisplayLine {
-                line: Line::raw(format!("{prefix}{}", "─".repeat(width - prefix.width()))),
-                source: line.source..line.source,
-                mappings: Vec::new(),
-                image: None,
-                destinations: Vec::new(),
-            });
+            result.push(rule_line(&line, width));
             continue;
         }
         // 装飾境界をまたぐ書記素を維持し、通常文字のCellはこの文字列を借用する。
         let rendered: String = line.runs.iter().map(|r| r.text.as_str()).collect();
         let mut data = cells(&line, document, colors, &rendered);
-        // ソース対応を作ってから装飾だけを重ねる。引用・字下げでコードの元位置が飛んでも対応を壊さない。
         if colors && let Some(language) = &line.language {
-            let tokens = highlight(
-                vec![run(&rendered, Style::default(), 0..rendered.len())],
-                language,
-            );
-            let mut token = 0;
-            for cell in &mut data {
-                while token + 1 < tokens.len() && tokens[token].source.end <= cell.offset {
-                    token += 1;
-                }
-                if let Some(highlight) = tokens.get(token) {
-                    cell.style = highlight.style;
-                }
-            }
+            apply_highlight(&mut data, &rendered, language);
         }
-        let mut start = 0;
-        let mut first = true;
-        let mut code_continuation = false;
-        loop {
-            let outer = if first {
+        wrap(&line, &data, width, &mut result);
+    }
+    result
+}
+
+/// 字下げを入れると本文が4セル未満になる狭い画面では、外側の字下げを省く。
+fn outer_prefix(prefix: &str, width: usize) -> &str {
+    if prefix.width() + 4 <= width {
+        prefix
+    } else {
+        ""
+    }
+}
+
+fn rule_line(line: &LogicalLine, width: usize) -> DisplayLine {
+    let prefix = outer_prefix(&line.prefix, width);
+    DisplayLine {
+        line: Line::raw(format!("{prefix}{}", "─".repeat(width - prefix.width()))),
+        source: line.source..line.source,
+        mappings: Vec::new(),
+        image: None,
+        destinations: Vec::new(),
+    }
+}
+
+/// ソース対応を作ってから装飾だけを重ねる。引用・字下げでコードの元位置が飛んでも対応を壊さない。
+fn apply_highlight(data: &mut [Cell], rendered: &str, language: &str) {
+    let tokens = highlight(
+        vec![run(rendered, Style::default(), 0..rendered.len())],
+        language,
+    );
+    let mut token = 0;
+    for cell in data {
+        while token + 1 < tokens.len() && tokens[token].source.end <= cell.offset {
+            token += 1;
+        }
+        if let Some(highlight) = tokens.get(token) {
+            cell.style = highlight.style;
+        }
+    }
+}
+
+/// 論理行の書記素セルを本文幅で表示行へ折り返す。
+fn wrap(line: &LogicalLine, data: &[Cell], width: usize, result: &mut Vec<DisplayLine>) {
+    let mut start = 0;
+    let mut first = true;
+    let mut code_continuation = false;
+    loop {
+        let outer = outer_prefix(
+            if first {
                 &line.prefix
             } else {
                 &line.continuation
-            };
-            let outer = if outer.width() + 4 <= width {
-                outer.as_str()
-            } else {
-                ""
-            };
-            let marker = if line.code && code_continuation {
-                "↪ "
-            } else {
-                ""
-            };
-            let prefix = format!("{outer}{marker}");
-            let available = width.saturating_sub(prefix.width()).max(1);
-            let mut end = start;
-            let mut used = 0;
-            let mut last_space = None;
-            while end < data.len() && data[end].text != "\n" && used + data[end].width <= available
-            {
-                used += data[end].width;
-                if data[end].text.chars().all(char::is_whitespace) {
-                    last_space = Some(end);
-                }
-                end += 1;
-            }
-            let hard = end < data.len() && data[end].text == "\n";
-            let mut next = end;
-            if !line.code && !hard && end < data.len() {
-                // 一語が本文幅を超える日本語やURLは、手前の空白へ戻さず
-                // 現在行の残り幅を使って書記素境界で分割する。
-                let space = last_space.filter(|&s| s > start).filter(|&s| {
-                    data[s + 1..]
-                        .iter()
-                        .take_while(|c| !c.text.chars().all(char::is_whitespace))
-                        .map(|c| c.width)
-                        .sum::<usize>()
-                        <= available
-                });
-                if let Some(space) = space {
-                    end = space;
-                    next = space + 1;
-                } else {
-                    // 空白がちょうど次の行に出る場合は通常文の折返し境界として消費する。
-                    while next < data.len() && data[next].text == " " {
-                        next += 1;
-                    }
-                }
-            }
-            if end == start && next == start && !hard && end < data.len() {
-                end += 1;
-                next = end;
-            }
-            let source_start = data.get(start).map_or_else(
-                || data.last().map_or(line.source, |c| c.source.end),
-                |c| c.source.start,
-            );
-            let source_end = data[start..next]
+            },
+            width,
+        );
+        let marker = if line.code && code_continuation {
+            "↪ "
+        } else {
+            ""
+        };
+        let prefix = format!("{outer}{marker}");
+        let available = width.saturating_sub(prefix.width()).max(1);
+        let (end, next, hard) = break_point(data, start, available, line.code);
+        let source_start = data.get(start).map_or_else(
+            || data.last().map_or(line.source, |c| c.source.end),
+            |c| c.source.start,
+        );
+        let source_end = data[start..next]
+            .iter()
+            .map(|c| c.source.end)
+            .max()
+            .unwrap_or(source_start);
+        result.push(display_line(
+            prefix,
+            &data[start..end],
+            source_start..source_end.max(source_start),
+        ));
+        first = false;
+        if hard {
+            start = end + 1;
+            code_continuation = false;
+        } else {
+            start = next;
+            code_continuation = true;
+        }
+        if start >= data.len() && (!hard || !line.code) {
+            break;
+        }
+    }
+}
+
+/// `start` から始まる表示行の終端 `end`、次の行の開始 `next`、改行で終わるかを返す。
+fn break_point(data: &[Cell], start: usize, available: usize, code: bool) -> (usize, usize, bool) {
+    let mut end = start;
+    let mut used = 0;
+    let mut last_space = None;
+    while end < data.len() && data[end].text != "\n" && used + data[end].width <= available {
+        used += data[end].width;
+        if data[end].text.chars().all(char::is_whitespace) {
+            last_space = Some(end);
+        }
+        end += 1;
+    }
+    let hard = end < data.len() && data[end].text == "\n";
+    let mut next = end;
+    if !code && !hard && end < data.len() {
+        // 一語が本文幅を超える日本語やURLは、手前の空白へ戻さず
+        // 現在行の残り幅を使って書記素境界で分割する。
+        let space = last_space.filter(|&s| s > start).filter(|&s| {
+            data[s + 1..]
                 .iter()
-                .map(|c| c.source.end)
-                .max()
-                .unwrap_or(source_start);
-            let mut byte_offset = prefix.len();
-            let mut mappings = Vec::new();
-            let mut destinations = Vec::new();
-            let mut spans = vec![Span::raw(prefix)];
-            for c in &data[start..end] {
-                mappings.push((byte_offset..byte_offset + c.text.len(), c.source.clone()));
-                if let Some((id, range)) = &c.destination {
-                    destinations.push((
-                        byte_offset..byte_offset + c.text.len(),
-                        *id,
-                        range.clone(),
-                    ));
-                }
-                byte_offset += c.text.len();
-                // 通常の最小幅20以上では書記素は収まる。単独書記素が超過した場合も破壊しない。
-                if let Some(last) = spans.last_mut().filter(|s| s.style == c.style) {
-                    last.content.to_mut().push_str(&c.text);
-                } else {
-                    spans.push(Span::styled(c.text.to_string(), c.style));
-                }
-            }
-            result.push(DisplayLine {
-                line: Line::from(spans),
-                source: source_start..source_end.max(source_start),
-                mappings,
-                image: None,
-                destinations,
-            });
-            first = false;
-            if hard {
-                start = end + 1;
-                code_continuation = false;
-            } else {
-                start = next;
-                code_continuation = true;
-            }
-            if start >= data.len() && (!hard || !line.code) {
-                break;
+                .take_while(|c| !c.text.chars().all(char::is_whitespace))
+                .map(|c| c.width)
+                .sum::<usize>()
+                <= available
+        });
+        if let Some(space) = space {
+            end = space;
+            next = space + 1;
+        } else {
+            // 空白がちょうど次の行に出る場合は通常文の折返し境界として消費する。
+            while next < data.len() && data[next].text == " " {
+                next += 1;
             }
         }
     }
-    result
+    if end == start && next == start && !hard && end < data.len() {
+        end += 1;
+        next = end;
+    }
+    (end, next, hard)
+}
+
+fn display_line(prefix: String, cells: &[Cell], source: Range<usize>) -> DisplayLine {
+    let mut byte_offset = prefix.len();
+    let mut mappings = Vec::new();
+    let mut destinations = Vec::new();
+    let mut spans = vec![Span::raw(prefix)];
+    for c in cells {
+        let text = byte_offset..byte_offset + c.text.len();
+        if let Some((id, target)) = &c.destination {
+            destinations.push(Destination {
+                text: text.clone(),
+                id: *id,
+                target: target.clone(),
+            });
+        }
+        mappings.push(Mapping {
+            text,
+            source: c.source.clone(),
+        });
+        byte_offset += c.text.len();
+        // 通常の最小幅20以上では書記素は収まる。単独書記素が超過した場合も破壊しない。
+        if let Some(last) = spans.last_mut().filter(|s| s.style == c.style) {
+            last.content.to_mut().push_str(&c.text);
+        } else {
+            spans.push(Span::styled(c.text.to_string(), c.style));
+        }
+    }
+    DisplayLine {
+        line: Line::from(spans),
+        source,
+        mappings,
+        image: None,
+        destinations,
+    }
 }
 
 /// 折返し・表形式によらない論理文字列とUTF-8ソース範囲。生成ラベルは除く。
@@ -831,27 +874,29 @@ pub fn search_segments(document: &Document) -> Vec<Segment> {
                 let previous_destination = segment
                     .destinations
                     .last()
-                    .is_some_and(|(r, _, _)| r.end == start);
-                if let Some((id, range)) = &cell.destination {
-                    segment
-                        .destinations
-                        .push((start..segment.text.len(), *id, range.clone()));
+                    .is_some_and(|d| d.text.end == start);
+                if let Some((id, target)) = &cell.destination {
+                    segment.destinations.push(Destination {
+                        text: start..segment.text.len(),
+                        id: *id,
+                        target: target.clone(),
+                    });
                 }
-                if let Some((logical, source)) =
-                    segment.mappings.last_mut().filter(|(logical, source)| {
-                        logical.len() == source.len()
-                            && cell.text.len() == cell.source.len()
-                            && source.end == cell.source.start
-                            && cell.destination.is_none()
-                            && !previous_destination
-                    })
-                {
-                    logical.end = segment.text.len();
-                    source.end = cell.source.end;
+                // 1バイトずつ対応する連続した本文は一つの対応にまとめる。
+                if let Some(last) = segment.mappings.last_mut().filter(|last| {
+                    last.text.len() == last.source.len()
+                        && cell.text.len() == cell.source.len()
+                        && last.source.end == cell.source.start
+                        && cell.destination.is_none()
+                        && !previous_destination
+                }) {
+                    last.text.end = segment.text.len();
+                    last.source.end = cell.source.end;
                 } else {
-                    segment
-                        .mappings
-                        .push((start..segment.text.len(), cell.source));
+                    segment.mappings.push(Mapping {
+                        text: start..segment.text.len(),
+                        source: cell.source,
+                    });
                 }
             }
         }

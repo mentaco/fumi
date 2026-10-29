@@ -1,6 +1,6 @@
 use crate::{
     document::Document,
-    layout::{DisplayLine, anchored_row, layout, search_segments, truncate_middle},
+    layout::{DisplayLine, Mapping, anchored_row, layout, search_segments, truncate_middle},
     math::{Status, View},
     search::{self, Search, Segment},
     source::sanitize,
@@ -25,6 +25,34 @@ pub enum Action {
     Suspend,
 }
 
+/// 本文とヘルプで共通のスクロール操作。
+#[derive(Clone, Copy, Debug)]
+enum Scroll {
+    Down(usize),
+    Up(usize),
+    Top,
+    Bottom,
+}
+
+/// 本文と独立した閲覧位置を持つヘルプ。
+struct Help {
+    document: Document,
+    lines: Vec<DisplayLine>,
+    top: usize,
+    pending_g: bool,
+}
+
+impl Help {
+    fn relayout(&mut self, width: usize, colors: bool) {
+        let anchor = source_anchor(&self.lines, self.top);
+        self.lines = layout(&self.document, width, colors);
+        self.top = anchored_row(&self.lines, anchor);
+    }
+    fn max_top(&self, viewport: usize) -> usize {
+        self.lines.len().saturating_sub(viewport)
+    }
+}
+
 pub struct App {
     pub document: Document,
     pub lines: Vec<DisplayLine>,
@@ -38,10 +66,7 @@ pub struct App {
     pub warning: String,
     pub help: bool,
     pub pending_g: bool,
-    help_pending_g: bool,
-    help_top: usize,
-    help_document: Document,
-    help_lines: Vec<DisplayLine>,
+    help_view: Help,
     layout_width: usize,
     pub width: u16,
     pub height: u16,
@@ -64,10 +89,12 @@ impl App {
             warning: String::new(),
             help: false,
             pending_g: false,
-            help_pending_g: false,
-            help_top: 0,
-            help_document: Document::parse(HELP.to_string()),
-            help_lines: Vec::new(),
+            help_view: Help {
+                document: Document::parse(HELP.to_string()),
+                lines: Vec::new(),
+                top: 0,
+                pending_g: false,
+            },
             layout_width: 0,
             width: 0,
             height: 0,
@@ -93,53 +120,78 @@ impl App {
         self.lines.len().saturating_sub(self.viewport())
     }
     pub fn percentage(&self) -> usize {
-        (100 * self.top).checked_div(self.max_top()).unwrap_or(100)
+        percentage(self.top, self.max_top())
+    }
+
+    fn top_image(&self) -> Option<(usize, usize)> {
+        self.lines.get(self.top).and_then(|l| l.image)
+    }
+    fn clear_pending_g(&mut self) {
+        self.pending_g = false;
+        self.help_view.pending_g = false;
+    }
+    fn active_pending_g_mut(&mut self) -> &mut bool {
+        if self.help {
+            &mut self.help_view.pending_g
+        } else {
+            &mut self.pending_g
+        }
+    }
+
+    /// 表示中の画面（本文またはヘルプ）をスクロールする。
+    fn scroll(&mut self, scroll: Scroll) {
+        let viewport = self.viewport();
+        let (top, max) = if self.help {
+            let max = self.help_view.max_top(viewport);
+            (&mut self.help_view.top, max)
+        } else {
+            let max = self.max_top();
+            (&mut self.top, max)
+        };
+        *top = match scroll {
+            Scroll::Down(n) => top.saturating_add(n).min(max),
+            Scroll::Up(n) => top.saturating_sub(n),
+            Scroll::Top => 0,
+            Scroll::Bottom => max,
+        };
+    }
+
+    /// 本文の表示行を作り直し、先頭行のソース位置へ戻す。
+    fn relayout(&mut self) {
+        let anchor = source_anchor(&self.lines, self.top);
+        self.lines = layout(&self.document, self.body_width(), self.colors);
+        self.overlay_math();
+        self.top = anchored_row(&self.lines, anchor).min(self.max_top());
     }
 
     pub fn resize(&mut self, width: u16, height: u16) {
         if self.width == width && self.height == height {
             return;
         }
-        let anchor = self.lines.get(self.top).map_or(0, |l| l.source.start);
-        let image_anchor = self.lines.get(self.top).and_then(|l| l.image);
-        if image_anchor.is_some() {
-            self.deferred_image_anchor = image_anchor;
+        // 幅が変わると画像は作り直しになるため、画像内の行は生成後に復元する。
+        if let Some(image) = self.top_image() {
+            self.deferred_image_anchor = Some(image);
         }
-        let help_anchor = self
-            .help_lines
-            .get(self.help_top)
-            .map_or(0, |l| l.source.start);
         self.width = width;
         self.height = height;
         if self.too_small() {
             self.search.input = None;
             self.help = false;
-            self.pending_g = false;
-            self.help_pending_g = false;
+            self.clear_pending_g();
             return;
         }
         let body_width = self.body_width();
         if self.layout_width != body_width {
             self.math_views.clear();
-            self.lines = layout(&self.document, body_width, self.colors);
-            self.overlay_math();
-            self.help_lines = layout(&self.help_document, body_width, self.colors);
+            self.relayout();
+            self.help_view.relayout(body_width, self.colors);
             self.layout_width = body_width;
-            self.top = anchored_row(&self.lines, anchor);
-            if let Some((source, offset)) = image_anchor
-                && let Some(row) = self
-                    .lines
-                    .iter()
-                    .position(|l| l.image == Some((source, offset)))
-            {
-                self.top = row;
-            }
-            self.help_top = anchored_row(&self.help_lines, help_anchor);
         }
         self.top = self.top.min(self.max_top());
-        self.help_top = self
-            .help_top
-            .min(self.help_lines.len().saturating_sub(self.viewport()));
+        self.help_view.top = self
+            .help_view
+            .top
+            .min(self.help_view.max_top(self.viewport()));
     }
 
     pub fn key(&mut self, key: KeyEvent) -> Action {
@@ -169,59 +221,58 @@ impl App {
         if key.modifiers.intersects(
             KeyModifiers::ALT | KeyModifiers::SUPER | KeyModifiers::HYPER | KeyModifiers::META,
         ) {
-            self.pending_g = false;
-            self.help_pending_g = false;
+            self.clear_pending_g();
             return Action::None;
         }
         if self.search.input.is_some() {
-            match (ctrl, key.code) {
-                (false, KeyCode::Esc) => {
-                    self.search.input = None;
-                }
-                (false, KeyCode::Enter) => self.confirm_search(),
-                (true, KeyCode::Char('u')) => {
-                    self.search.input = Some(String::new());
-                    self.refresh_candidates();
-                }
-                (false, KeyCode::Backspace) => {
-                    if let Some(input) = &mut self.search.input {
-                        let end = input
-                            .grapheme_indices(true)
-                            .next_back()
-                            .map_or(0, |(i, _)| i);
-                        input.truncate(end);
-                    }
-                    self.refresh_candidates();
-                }
-                (false, KeyCode::Char(c)) if !c.is_control() => self.paste(&c.to_string()),
-                _ => {}
-            }
+            self.search_key(ctrl, key.code);
             return Action::None;
         }
-        let pending = if self.help {
-            &mut self.help_pending_g
-        } else {
-            &mut self.pending_g
-        };
+        self.view_key(ctrl, key.code)
+    }
+
+    /// 検索語の入力中の操作。
+    fn search_key(&mut self, ctrl: bool, code: KeyCode) {
+        match (ctrl, code) {
+            (false, KeyCode::Esc) => self.search.input = None,
+            (false, KeyCode::Enter) => self.confirm_search(),
+            (true, KeyCode::Char('u')) => {
+                self.search.input = Some(String::new());
+                self.refresh_candidates();
+            }
+            (false, KeyCode::Backspace) => {
+                if let Some(input) = &mut self.search.input {
+                    let end = input
+                        .grapheme_indices(true)
+                        .next_back()
+                        .map_or(0, |(i, _)| i);
+                    input.truncate(end);
+                }
+                self.refresh_candidates();
+            }
+            (false, KeyCode::Char(c)) if !c.is_control() => self.paste(&c.to_string()),
+            _ => {}
+        }
+    }
+
+    /// 本文・ヘルプの閲覧中の操作。
+    fn view_key(&mut self, ctrl: bool, code: KeyCode) -> Action {
+        let pending = self.active_pending_g_mut();
         if *pending {
             *pending = false;
-            if !ctrl && key.code == KeyCode::Esc {
+            if !ctrl && code == KeyCode::Esc {
                 return Action::None;
             }
-            if !ctrl && key.code == KeyCode::Char('g') {
-                if self.help {
-                    self.help_top = 0;
-                } else {
-                    self.top = 0;
-                }
+            if !ctrl && code == KeyCode::Char('g') {
+                self.scroll(Scroll::Top);
                 return Action::None;
             }
         }
         if !ctrl {
-            match key.code {
+            match code {
                 KeyCode::Esc if self.help => {
                     self.help = false;
-                    self.help_pending_g = false;
+                    self.help_view.pending_g = false;
                     return Action::None;
                 }
                 KeyCode::Char('q') => return Action::Exit(0),
@@ -231,9 +282,8 @@ impl App {
                 }
                 KeyCode::Char('?') => {
                     self.help = !self.help;
-                    self.pending_g = false;
-                    self.help_pending_g = false;
-                    self.help_top = 0;
+                    self.clear_pending_g();
+                    self.help_view.top = 0;
                     return Action::None;
                 }
                 KeyCode::Char('/') if !self.help => {
@@ -245,15 +295,11 @@ impl App {
                     return Action::None;
                 }
                 KeyCode::Char('n' | 'N') if !self.help => {
-                    self.next_match(key.code == KeyCode::Char('N'));
+                    self.next_match(code == KeyCode::Char('N'));
                     return Action::None;
                 }
                 KeyCode::Char('g') => {
-                    if self.help {
-                        self.help_pending_g = true;
-                    } else {
-                        self.pending_g = true;
-                    }
+                    *self.active_pending_g_mut() = true;
                     return Action::None;
                 }
                 _ => {}
@@ -261,44 +307,20 @@ impl App {
         }
         self.deferred_image_anchor = None;
         let v = self.viewport();
-        let max = if self.help {
-            self.help_lines.len().saturating_sub(v)
-        } else {
-            self.max_top()
+        let half = (v / 2).max(1);
+        let page = v.saturating_sub(1).max(1);
+        let scroll = match (ctrl, code) {
+            (false, KeyCode::Char('j') | KeyCode::Down) => Scroll::Down(1),
+            (false, KeyCode::Char('k') | KeyCode::Up) => Scroll::Up(1),
+            (true, KeyCode::Char('d')) => Scroll::Down(half),
+            (true, KeyCode::Char('u')) => Scroll::Up(half),
+            (true, KeyCode::Char('f')) | (false, KeyCode::PageDown) => Scroll::Down(page),
+            (true, KeyCode::Char('b')) | (false, KeyCode::PageUp) => Scroll::Up(page),
+            (false, KeyCode::Home) => Scroll::Top,
+            (false, KeyCode::End | KeyCode::Char('G')) => Scroll::Bottom,
+            _ => return Action::None,
         };
-        let top = if self.help {
-            &mut self.help_top
-        } else {
-            &mut self.top
-        };
-        let movement = match (ctrl, key.code) {
-            (false, KeyCode::Char('j') | KeyCode::Down) => Some((true, 1)),
-            (false, KeyCode::Char('k') | KeyCode::Up) => Some((false, 1)),
-            (true, KeyCode::Char('d')) => Some((true, (v / 2).max(1))),
-            (true, KeyCode::Char('u')) => Some((false, (v / 2).max(1))),
-            (true, KeyCode::Char('f')) | (false, KeyCode::PageDown) => {
-                Some((true, v.saturating_sub(1).max(1)))
-            }
-            (true, KeyCode::Char('b')) | (false, KeyCode::PageUp) => {
-                Some((false, v.saturating_sub(1).max(1)))
-            }
-            (false, KeyCode::Home) => {
-                *top = 0;
-                None
-            }
-            (false, KeyCode::End | KeyCode::Char('G')) => {
-                *top = max;
-                None
-            }
-            _ => None,
-        };
-        if let Some((down, n)) = movement {
-            *top = if down {
-                top.saturating_add(n).min(max)
-            } else {
-                top.saturating_sub(n)
-            };
-        }
+        self.scroll(scroll);
         Action::None
     }
 
@@ -315,12 +337,7 @@ impl App {
         if same {
             return false;
         }
-        let anchor = self.lines.get(self.top).map_or(0, |l| l.source.start);
-        let image_anchor = self
-            .lines
-            .get(self.top)
-            .and_then(|l| l.image)
-            .or(self.deferred_image_anchor);
+        let image_anchor = self.top_image().or(self.deferred_image_anchor);
         if image_anchor.is_some() && status == Status::Pending {
             self.deferred_image_anchor = image_anchor;
         }
@@ -333,9 +350,7 @@ impl App {
         if !self.document.has_display_math() {
             return false;
         }
-        self.lines = layout(&self.document, self.body_width(), self.colors);
-        self.overlay_math();
-        self.top = anchored_row(&self.lines, anchor).min(self.max_top());
+        self.relayout();
         if let Some((source, offset)) = image_anchor
             && let Some(View::Ready(image)) = self.math_views.get(&source)
             && let Some(row) = self
@@ -361,7 +376,10 @@ impl App {
                 .position(|line| line.source.start >= node.source.end)
                 .map_or(self.lines.len(), |i| start + i);
             let label = |text: String| DisplayLine {
-                mappings: vec![(0..text.len(), node.source.clone())],
+                mappings: vec![Mapping {
+                    text: 0..text.len(),
+                    source: node.source.clone(),
+                }],
                 line: Line::raw(text),
                 source: node.source.clone(),
                 image: None,
@@ -433,7 +451,7 @@ impl App {
             &self.search.query,
         );
         self.search.index_destinations();
-        let anchor = self.lines.get(self.top).map_or(0, |l| l.source.start);
+        let anchor = source_anchor(&self.lines, self.top);
         self.search.wrapped = false;
         self.search.current = if self.search.matches.is_empty() {
             None
@@ -479,19 +497,9 @@ impl App {
             return;
         }
         self.deferred_image_anchor = None;
-        let max = if self.help {
-            self.help_lines.len().saturating_sub(self.viewport())
-        } else {
-            self.max_top()
-        };
-        let top = if self.help {
-            &mut self.help_top
-        } else {
-            &mut self.top
-        };
         match event.kind {
-            MouseEventKind::ScrollDown => *top = top.saturating_add(3).min(max),
-            MouseEventKind::ScrollUp => *top = top.saturating_sub(3),
+            MouseEventKind::ScrollDown => self.scroll(Scroll::Down(3)),
+            MouseEventKind::ScrollUp => self.scroll(Scroll::Up(3)),
             _ => {}
         }
     }
@@ -507,15 +515,14 @@ impl App {
                 let source = line
                     .mappings
                     .iter()
-                    .find(|(r, _)| r.contains(&offset))
-                    .map(|(_, s)| s);
+                    .find(|m| m.text.contains(&offset))
+                    .map(|m| &m.source);
                 let mut style = span.style;
-                if let Some((_, id, target)) = line
-                    .destinations
-                    .iter()
-                    .find(|(r, _, _)| r.contains(&offset))
+                if let Some(destination) =
+                    line.destinations.iter().find(|d| d.text.contains(&offset))
                 {
-                    if let Some(entries) = self.search.destination_matches.get(id) {
+                    let target = &destination.target;
+                    if let Some(entries) = self.search.destination_matches.get(&destination.id) {
                         let first = entries.partition_point(|(range, _)| range.end <= target.start);
                         for (_, i) in entries[first..]
                             .iter()
@@ -574,10 +581,10 @@ impl App {
             );
         }
         let (position, pending) = if self.help {
-            let max = self.help_lines.len().saturating_sub(self.viewport());
+            let help = &self.help_view;
             (
-                (100 * self.help_top).checked_div(max).unwrap_or(100),
-                self.help_pending_g,
+                percentage(help.top, help.max_top(self.viewport())),
+                help.pending_g,
             )
         } else {
             (self.percentage(), self.pending_g)
@@ -653,7 +660,7 @@ impl App {
         let margin = u16::from(self.width >= 40);
         let body = Rect::new(margin, 0, self.body_width() as u16, self.height - 1);
         let (lines, top) = if self.help {
-            (&self.help_lines, self.help_top)
+            (&self.help_view.lines, self.help_view.top)
         } else {
             (&self.lines, self.top)
         };
@@ -675,6 +682,16 @@ impl App {
             Rect::new(0, self.height - 1, self.width, 1),
         );
     }
+}
+
+/// 先頭行のソース位置。再レイアウト後の閲覧位置の基準にする。
+fn source_anchor(lines: &[DisplayLine], top: usize) -> usize {
+    lines.get(top).map_or(0, |l| l.source.start)
+}
+
+/// 末尾位置を100%とする百分率。スクロール不要な場合も100%。
+fn percentage(top: usize, max_top: usize) -> usize {
+    (100 * top).checked_div(max_top).unwrap_or(100)
 }
 
 trait WidthCells {

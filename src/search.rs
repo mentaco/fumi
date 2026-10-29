@@ -1,10 +1,11 @@
+use crate::layout::{Destination, Mapping};
 use std::ops::Range;
 
 #[derive(Default)]
 pub struct Segment {
     pub text: String,
-    pub mappings: Vec<(Range<usize>, Range<usize>)>,
-    pub destinations: Vec<(Range<usize>, usize, Range<usize>)>,
+    pub mappings: Vec<Mapping>,
+    pub destinations: Vec<Destination>,
 }
 
 #[derive(Clone, Debug)]
@@ -34,26 +35,27 @@ pub fn find(segments: &[Segment], query: &str) -> Vec<Match> {
     for segment in segments {
         for (start, text) in segment.text.match_indices(query) {
             let end = start + text.len();
-            let first = segment
-                .mappings
-                .partition_point(|(range, _)| range.end <= start);
+            let first = segment.mappings.partition_point(|m| m.text.end <= start);
             let mut ranges: Vec<Range<usize>> = Vec::new();
             let mut destinations = Vec::new();
             let mut anchor = None;
-            for (logical, source) in segment.mappings[first..]
+            for Mapping {
+                text: logical,
+                source,
+            } in segment.mappings[first..]
                 .iter()
-                .take_while(|(range, _)| range.start < end)
+                .take_while(|m| m.text.start < end)
             {
                 anchor.get_or_insert(source.start);
                 let dest_first = segment
                     .destinations
-                    .partition_point(|(range, _, _)| range.end <= logical.start);
-                if let Some((_, id, target)) = segment
+                    .partition_point(|d| d.text.end <= logical.start);
+                if let Some(d) = segment
                     .destinations
                     .get(dest_first)
-                    .filter(|(r, _, _)| r.start < logical.end)
+                    .filter(|d| d.text.start < logical.end)
                 {
-                    destinations.push((*id, target.clone()));
+                    destinations.push((d.id, d.target.clone()));
                     continue;
                 }
                 let range = if logical.len() == source.len() {
