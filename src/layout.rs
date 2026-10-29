@@ -1,5 +1,7 @@
 use crate::{
     document::{Document, Kind, Node},
+    highlight::highlight,
+    search::Segment,
     source::sanitize,
 };
 use pulldown_cmark::{Alignment, CodeBlockKind, Tag};
@@ -68,7 +70,7 @@ fn inline(nodes: &[Node], style: Style, out: &mut Vec<Run>) {
     for node in nodes {
         let r = node.source.clone();
         match &node.kind {
-            Kind::Text(s) | Kind::Html(s) | Kind::Math(s) => out.push(run(s, style, r)),
+            Kind::Text(s) | Kind::Html(s) | Kind::Math { raw: s, .. } => out.push(run(s, style, r)),
             Kind::Code(s) => out.push(run(
                 s,
                 style.add_modifier(Modifier::DIM | Modifier::UNDERLINED),
@@ -139,7 +141,7 @@ fn is_block(node: &Node) -> bool {
                     | Tag::Table(_)
                     | Tag::HtmlBlock
             )
-    ) || matches!(&node.kind, Kind::Math(s) if s.trim_start().starts_with("$$"))
+    ) || matches!(node.kind, Kind::Math { display: true, .. })
 }
 
 fn blank(lines: &mut Vec<LogicalLine>, source: usize) {
@@ -189,8 +191,8 @@ fn block(node: &Node, width: usize) -> Vec<LogicalLine> {
             rule: true,
             ..base()
         }],
-        Kind::Math(s) => vec![LogicalLine {
-            runs: vec![run(s, Style::default(), node.source.clone())],
+        Kind::Math { raw, .. } => vec![LogicalLine {
+            runs: vec![run(raw, Style::default(), node.source.clone())],
             code: true,
             ..base()
         }],
@@ -672,7 +674,7 @@ pub fn layout(document: &Document, width: usize, colors: bool) -> Vec<DisplayLin
         let mut data = cells(&line, document, colors, &rendered);
         // ソース対応を作ってから装飾だけを重ねる。引用・字下げでコードの元位置が飛んでも対応を壊さない。
         if colors && let Some(language) = &line.language {
-            let tokens = crate::highlight::highlight(
+            let tokens = highlight(
                 vec![run(&rendered, Style::default(), 0..rendered.len())],
                 language,
             );
@@ -799,7 +801,7 @@ pub fn layout(document: &Document, width: usize, colors: bool) -> Vec<DisplayLin
 }
 
 /// 折返し・表形式によらない論理文字列とUTF-8ソース範囲。生成ラベルは除く。
-pub fn search_segments(document: &Document) -> Vec<crate::search::Segment> {
+pub fn search_segments(document: &Document) -> Vec<Segment> {
     let mut result = Vec::new();
     for line in sequence(&document.nodes, true, 0) {
         let rendered: String = line
@@ -816,13 +818,13 @@ pub fn search_segments(document: &Document) -> Vec<crate::search::Segment> {
                 .collect(),
             ..Default::default()
         };
-        let mut segment = crate::search::Segment::default();
+        let mut segment = Segment::default();
         for cell in cells(&filtered, document, false, &rendered) {
             if cell.text == "\n" {
                 if !segment.text.is_empty() {
                     result.push(segment);
                 }
-                segment = crate::search::Segment::default();
+                segment = Segment::default();
             } else {
                 let start = segment.text.len();
                 segment.text.push_str(&cell.text);

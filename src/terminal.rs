@@ -1,4 +1,10 @@
-use crate::app::{Action, App};
+use crate::{
+    app::{Action, App},
+    cli::GraphicsMode,
+    graphics::{Capabilities, Kitty},
+    input::{Decoder, InputEvent},
+    math::{Manager, Status},
+};
 use crossterm::{
     cursor::{Hide, Show},
     event::{DisableBracketedPaste, EnableBracketedPaste, Event},
@@ -118,13 +124,15 @@ impl Drop for Guard {
     }
 }
 
-pub fn run(
-    mut app: App,
-    signals: &Signals,
-    graphics: crate::cli::GraphicsMode,
-    plain: bool,
-    colors: bool,
-) -> io::Result<u8> {
+/// 画像の照会と生成に使うCLI指定。
+#[derive(Clone, Copy, Debug)]
+pub struct GraphicsOptions {
+    pub mode: GraphicsMode,
+    pub plain: bool,
+    pub colors: bool,
+}
+
+pub fn run(mut app: App, signals: &Signals, options: GraphicsOptions) -> io::Result<u8> {
     install_panic_hook();
     if let Some(code) = signals.exit_code() {
         return Ok(code);
@@ -135,9 +143,9 @@ pub fn run(
     crate::profile::mark("terminal_ms");
     app.resize(size.width, size.height);
     crate::profile::mark("layout_ms");
-    let mut decoder = crate::input::Decoder::default();
-    let mut kitty = crate::graphics::Kitty::default();
-    let mut math = configure_graphics(&mut app, graphics, plain, colors, &mut decoder, None)?;
+    let mut decoder = Decoder::default();
+    let mut kitty = Kitty::default();
+    let mut math = configure_graphics(&mut app, options, &mut decoder, None)?;
     let mut dirty = true;
     let mut last_draw = Instant::now() - Duration::from_secs(1);
     loop {
@@ -152,21 +160,14 @@ pub fn run(
                 kitty.reset();
                 if !app.too_small() {
                     let previous = math.as_ref().map(|m| m.capabilities);
-                    math = configure_graphics(
-                        &mut app,
-                        graphics,
-                        plain,
-                        colors,
-                        &mut decoder,
-                        previous,
-                    )?;
+                    math = configure_graphics(&mut app, options, &mut decoder, previous)?;
                 }
             }
             dirty = true;
         }
         if let Some(manager) = &mut math {
             let views = manager.update(&app);
-            dirty |= app.set_math(views, "生成中");
+            dirty |= app.set_math(views, Status::Pending);
         }
         if dirty && last_draw.elapsed() >= Duration::from_millis(16) {
             kitty.clear_placements(terminal.backend_mut())?;
@@ -181,11 +182,7 @@ pub fn run(
                 .and_then(|()| kitty.draw(&app, terminal.backend_mut()))
                 .is_err()
             {
-                kitty.reset();
-                math = None;
-                app.graphics_active = false;
-                app.warning = "画像転送失敗".into();
-                app.set_math(Default::default(), "画像転送失敗");
+                disable_graphics(&mut app, &mut kitty, &mut math);
                 terminal.draw(|f| app.draw(f))?;
             }
             crate::profile::finish()?;
@@ -195,7 +192,7 @@ pub fn run(
         crate::input::read(&mut decoder, Duration::from_millis(16))?;
         while let Some(event) = decoder.events.pop_front() {
             match event {
-                crate::input::InputEvent::User(Event::Key(key)) => {
+                InputEvent::User(Event::Key(key)) => {
                     match app.key(key) {
                         Action::Exit(code) => return Ok(code),
                         Action::Suspend => suspend = true,
@@ -203,20 +200,16 @@ pub fn run(
                     }
                     dirty = true;
                 }
-                crate::input::InputEvent::User(Event::Mouse(mouse)) => {
+                InputEvent::User(Event::Mouse(mouse)) => {
                     app.mouse(mouse);
                     dirty = true;
                 }
-                crate::input::InputEvent::User(Event::Paste(text)) => {
+                InputEvent::User(Event::Paste(text)) => {
                     app.paste(&text);
                     dirty = true;
                 }
-                crate::input::InputEvent::Reply(reply) if kitty.has_error(&reply) => {
-                    kitty.reset();
-                    math = None;
-                    app.graphics_active = false;
-                    app.warning = "画像転送失敗".into();
-                    app.set_math(Default::default(), "画像転送失敗");
+                InputEvent::Reply(reply) if kitty.has_error(&reply) => {
+                    disable_graphics(&mut app, &mut kitty, &mut math);
                     dirty = true;
                 }
                 _ => {}
@@ -234,43 +227,55 @@ pub fn run(
             guard = Guard::enter()?;
             let size = terminal::size()?;
             app.resize(size.0, size.1);
-            math = configure_graphics(&mut app, graphics, plain, colors, &mut decoder, None)?;
+            math = configure_graphics(&mut app, options, &mut decoder, None)?;
             terminal.clear()?;
             dirty = true;
         }
     }
 }
 
+/// 転送失敗後はこの起動中に画像を再試行せず、テキスト表示へ戻す。
+fn disable_graphics(app: &mut App, kitty: &mut Kitty, math: &mut Option<Manager>) {
+    const REASON: &str = "画像転送失敗";
+    kitty.reset();
+    *math = None;
+    app.graphics_active = false;
+    app.warning = REASON.into();
+    app.set_math(Default::default(), Status::Unavailable(REASON.into()));
+}
+
 fn configure_graphics(
     app: &mut App,
-    graphics: crate::cli::GraphicsMode,
-    plain: bool,
-    colors: bool,
-    decoder: &mut crate::input::Decoder,
-    previous: Option<crate::graphics::Capabilities>,
-) -> io::Result<Option<crate::math::Manager>> {
-    if !app.document.nodes.iter().any(
-        |node| matches!(&node.kind, crate::document::Kind::Math(s) if s.trim().starts_with("$$")),
-    ) {
+    options: GraphicsOptions,
+    decoder: &mut Decoder,
+    previous: Option<Capabilities>,
+) -> io::Result<Option<Manager>> {
+    if !app.document.has_display_math() {
         app.graphics_active = false;
         app.warning.clear();
         return Ok(None);
     }
-    match crate::graphics::query(graphics, plain, colors, decoder, previous)? {
+    match crate::graphics::query(
+        options.mode,
+        options.plain,
+        options.colors,
+        decoder,
+        previous,
+    )? {
         Ok(capabilities) => {
             app.graphics_active = true;
             app.warning.clear();
-            app.set_math(Default::default(), "生成中");
-            Ok(Some(crate::math::Manager::new(&app.document, capabilities)))
+            app.set_math(Default::default(), Status::Pending);
+            Ok(Some(Manager::new(&app.document, capabilities)))
         }
         Err(reason) => {
             app.graphics_active = false;
-            app.warning = if plain || graphics == crate::cli::GraphicsMode::Off {
+            app.warning = if options.plain || options.mode == GraphicsMode::Off {
                 String::new()
             } else {
                 reason.clone()
             };
-            app.set_math(Default::default(), &reason);
+            app.set_math(Default::default(), Status::Unavailable(reason));
             Ok(None)
         }
     }

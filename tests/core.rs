@@ -21,7 +21,7 @@ fn maths(nodes: &[Node]) -> Vec<String> {
     nodes
         .iter()
         .flat_map(|n| {
-            let mut result = if let Kind::Math(s) = &n.kind {
+            let mut result = if let Kind::Math { raw: s, .. } = &n.kind {
                 vec![s.clone()]
             } else {
                 Vec::new()

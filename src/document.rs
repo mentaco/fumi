@@ -7,7 +7,11 @@ pub enum Kind {
     Text(String),
     Code(String),
     Html(String),
-    Math(String),
+    /// `raw` は区切りを含む元のソース。`display` はブロック数式。
+    Math {
+        raw: String,
+        display: bool,
+    },
     SoftBreak,
     HardBreak,
     Rule,
@@ -186,6 +190,22 @@ fn math_ranges(source: &str) -> Vec<(Range<usize>, bool)> {
 }
 
 impl Document {
+    /// ブロック数式の要素と、`$$` 区切りを除いたTeX。
+    /// ブロック数式はコンテナ外でだけ認識するため、最上位の要素だけを見る。
+    pub fn display_math(&self) -> impl DoubleEndedIterator<Item = (&Node, &str)> {
+        self.nodes.iter().filter_map(|node| match &node.kind {
+            Kind::Math { raw, display: true } => {
+                let tex = raw.trim().trim_start_matches("$$").trim_end_matches("$$");
+                Some((node, tex.trim()))
+            }
+            _ => None,
+        })
+    }
+
+    pub fn has_display_math(&self) -> bool {
+        self.display_math().next().is_some()
+    }
+
     pub fn parse(source: String) -> Self {
         let ranges = math_ranges(&source);
         let mut transformed = String::new();
@@ -247,7 +267,10 @@ impl Document {
                             && r.block
                             && matches!(node.kind, Kind::Element(Tag::CodeBlock(_)))
                         {
-                            node.kind = Kind::Math(source[r.original.clone()].to_string());
+                            node.kind = Kind::Math {
+                                raw: source[r.original.clone()].to_string(),
+                                display: true,
+                            };
                             node.source = r.original.clone();
                             node.children.clear();
                         }
@@ -266,7 +289,10 @@ impl Document {
                 }),
                 Event::Code(s) => {
                     if let Some(r) = replacement.filter(|r| !r.block) {
-                        Kind::Math(source[r.original.clone()].to_string())
+                        Kind::Math {
+                            raw: source[r.original.clone()].to_string(),
+                            display: false,
+                        }
                     } else {
                         Kind::Code(s.into_string())
                     }

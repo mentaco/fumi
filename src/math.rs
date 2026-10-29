@@ -1,7 +1,9 @@
 //! 数式は同じバイナリの隔離ワーカーで処理し、UI側で期限・世代・容量を管理する。
 use crate::{
     app::App,
-    document::{Document, Kind},
+    document::Document,
+    graphics::{Capabilities, PLACEHOLDER_COLUMNS, Transport, luminance},
+    layout::anchored_row,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -43,6 +45,37 @@ impl Image {
 pub enum View {
     Ready(Arc<Image>),
     Failed(String),
+}
+
+/// 個別の結果がまだない数式の扱い。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum Status {
+    /// ラベルを付けない。
+    #[default]
+    Idle,
+    /// 画像生成を待っている。
+    Pending,
+    /// 画像を使えない理由。
+    Unavailable(String),
+}
+impl Status {
+    pub fn label(&self) -> Option<&str> {
+        match self {
+            Self::Idle => None,
+            Self::Pending => Some("生成中"),
+            Self::Unavailable(reason) => Some(reason),
+        }
+    }
+}
+
+/// PNG署名に続くIHDRから幅と高さを読む。
+fn png_dimensions(png: &[u8]) -> Option<(u32, u32)> {
+    if !png.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return None;
+    }
+    let width = u32::from_be_bytes(png.get(16..20)?.try_into().ok()?);
+    let height = u32::from_be_bytes(png.get(20..24)?.try_into().ok()?);
+    Some((width, height))
 }
 
 /// 入力からパスやコマンドを取り出さない。マクロ状態は式ごとに新規パーサで初期化。
@@ -112,8 +145,7 @@ pub fn render(request: &Request) -> Result<Image, String> {
         },
     )
     .map_err(|_| "画像生成失敗")?;
-    let width = u32::from_be_bytes(png[16..20].try_into().unwrap());
-    let height = u32::from_be_bytes(png[20..24].try_into().unwrap());
+    let (width, height) = png_dimensions(&png).ok_or("画像生成失敗")?;
     let columns = (width as usize).div_ceil(usize::from(request.cell.0));
     let rows = (height as usize).div_ceil(usize::from(request.cell.1));
     // セル境界へ余白を付け、部分矩形の転送でも縦横比とセル座標を一致させる。
@@ -138,10 +170,7 @@ pub fn render(request: &Request) -> Result<Image, String> {
             if x < width && y < height {
                 let at = (y as usize * width as usize + x as usize) * channels;
                 if request.monochrome {
-                    let gray = ((u32::from(raw[at]) * 299
-                        + u32::from(raw[at + 1]) * 587
-                        + u32::from(raw[at + 2]) * 114)
-                        / 1000) as u8;
+                    let gray = luminance([raw[at], raw[at + 1], raw[at + 2]]);
                     padded.extend_from_slice(&[gray; 3]);
                 } else {
                     padded.extend_from_slice(&raw[at..at + 3]);
@@ -227,24 +256,13 @@ pub struct Manager {
     formulas: Vec<(Range<usize>, String)>,
     jobs: Vec<Job>,
     cache: VecDeque<Cache>,
-    pub capabilities: crate::graphics::Capabilities,
+    pub capabilities: Capabilities,
 }
 impl Manager {
-    pub fn new(document: &Document, capabilities: crate::graphics::Capabilities) -> Self {
+    pub fn new(document: &Document, capabilities: Capabilities) -> Self {
         let formulas = document
-            .nodes
-            .iter()
-            .filter_map(|node| match &node.kind {
-                Kind::Math(s) if s.trim().starts_with("$$") => Some((
-                    node.source.clone(),
-                    s.trim()
-                        .trim_start_matches("$$")
-                        .trim_end_matches("$$")
-                        .trim()
-                        .to_string(),
-                )),
-                _ => None,
-            })
+            .display_math()
+            .map(|(node, tex)| (node.source.clone(), tex.to_string()))
             .collect();
         Self {
             formulas,
@@ -256,8 +274,8 @@ impl Manager {
     fn key(&self, tex: &str, width: usize) -> Request {
         Request {
             tex: tex.into(),
-            width: if self.capabilities.transport == crate::graphics::Transport::Tmux {
-                width.min(crate::graphics::PLACEHOLDER_COLUMNS)
+            width: if self.capabilities.transport == Transport::Tmux {
+                width.min(PLACEHOLDER_COLUMNS)
             } else {
                 width
             },
@@ -300,10 +318,9 @@ impl Manager {
                     }) {
                         return None;
                     }
-                    let row = crate::layout::anchored_row(&app.lines, source.start);
+                    let row = anchored_row(&app.lines, source.start);
                     range.contains(&row).then(|| {
                         (
-                            source.start,
                             tex.clone(),
                             if row >= app.top && row < app.top + v {
                                 (0, row - app.top)
@@ -314,7 +331,7 @@ impl Manager {
                     })
                 })
                 .collect();
-            formulas.sort_by_key(|(_, _, distance)| *distance);
+            formulas.sort_by_key(|(_, distance)| *distance);
             formulas
         };
         // 実行中ジョブは位置に関わらず最大2秒で終える。古い幅の結果はキャッシュだけへ。
@@ -355,11 +372,8 @@ impl Manager {
                 let view = if expired {
                     View::Failed("2秒タイムアウト".into())
                 } else if matches!(status, Ok(Some(s)) if s.success())
-                    && job.bytes.len() >= 24
-                    && job.bytes.starts_with(b"\x89PNG\r\n\x1a\n")
+                    && let Some((width, height)) = png_dimensions(&job.bytes)
                 {
-                    let width = u32::from_be_bytes(job.bytes[16..20].try_into().unwrap());
-                    let height = u32::from_be_bytes(job.bytes[20..24].try_into().unwrap());
                     View::Ready(Arc::new(Image {
                         columns: width as usize / usize::from(job.key.cell.0),
                         rows: height as usize / usize::from(job.key.cell.1),
@@ -373,7 +387,7 @@ impl Manager {
                 self.insert(job.key.clone(), view);
             }
         }
-        for (source, tex, _) in wanted {
+        for (tex, _) in wanted {
             let key = self.key(&tex, width);
             if let Some(index) = self.cache.iter().position(|e| e.key == key) {
                 let entry = self.cache.remove(index).unwrap();
@@ -387,7 +401,7 @@ impl Manager {
                 self.insert(key, View::Failed("16 KiB上限".into()));
                 continue;
             }
-            match start_job(key.clone(), source) {
+            match start_job(key.clone()) {
                 Ok(job) => self.jobs.push(job),
                 Err(_) => self.insert(key, View::Failed("レンダラー起動失敗".into())),
             }
@@ -407,7 +421,7 @@ impl Manager {
         self.jobs.len()
     }
 }
-fn start_job(key: Request, _source: usize) -> io::Result<Job> {
+fn start_job(key: Request) -> io::Result<Job> {
     use std::os::fd::AsRawFd;
     let mut child = Command::new(std::env::current_exe()?)
         .env("FUMI_INTERNAL_MATH_WORKER", "1")
@@ -438,9 +452,9 @@ fn start_job(key: Request, _source: usize) -> io::Result<Job> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn capabilities() -> crate::graphics::Capabilities {
-        crate::graphics::Capabilities {
-            transport: crate::graphics::Transport::Direct,
+    fn capabilities() -> Capabilities {
+        Capabilities {
+            transport: Transport::Direct,
             cell: (10, 20),
             background: [0; 3],
             foreground: [255; 3],

@@ -1,17 +1,18 @@
 use crate::{
+    app::App,
     cli::GraphicsMode,
     input::{self, Decoder, InputEvent},
-    math::Image,
+    math::{Image, View},
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use ratatui::{Frame, style::Color};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     hash::BuildHasher,
     io::{self, Write},
     process::{Command, Stdio},
     sync::{
-        Mutex, OnceLock,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicU32, Ordering},
     },
     time::{Duration, Instant},
@@ -175,7 +176,7 @@ pub fn query(
     let mut foreground = None;
     let mut cell = None;
     let mut pixels = None;
-    let mut users = std::collections::VecDeque::new();
+    let mut users = VecDeque::new();
     while start.elapsed() < Duration::from_millis(150) {
         input::read(
             decoder,
@@ -288,7 +289,7 @@ pub fn query(
         monochrome: !colors,
     }))
 }
-fn luminance(rgb: [u8; 3]) -> u8 {
+pub(crate) fn luminance(rgb: [u8; 3]) -> u8 {
     ((u32::from(rgb[0]) * 299 + u32::from(rgb[1]) * 587 + u32::from(rgb[2]) * 114) / 1000) as u8
 }
 pub fn parse_color(reply: &str, index: u8) -> Option<[u8; 3]> {
@@ -320,19 +321,25 @@ pub fn kitty_reply(reply: &str) -> Option<(u32, bool)> {
     Some((id, message == "OK"))
 }
 
+/// `free` では画像データも解放し、そうでなければ配置だけを消す。
+fn delete_command(id: u32, free: bool) -> String {
+    let target = if free { 'I' } else { 'i' };
+    format!("\x1b_Ga=d,d={target},i={id},q=2\x1b\\")
+}
+
 /// 全削除は使わず、このプロセスが送ったIDだけを解放する。
 pub fn cleanup() {
     if let Ok(mut ids) = OWNED.lock() {
         let mut output = io::stdout();
         for (id, transport) in ids.drain(..) {
-            let _ = transport.control(&mut output, &format!("\x1b_Ga=d,d=I,i={id},q=2\x1b\\"));
+            let _ = transport.control(&mut output, &delete_command(id, true));
         }
         let _ = output.flush();
     }
 }
 
 fn release_image(id: u32, transport: Transport, output: &mut impl Write) -> io::Result<()> {
-    transport.control(output, &format!("\x1b_Ga=d,d=I,i={id},q=2\x1b\\"))?;
+    transport.control(output, &delete_command(id, true))?;
     if let Ok(mut ids) = OWNED.lock() {
         ids.retain(|(own, _)| *own != id);
     }
@@ -341,7 +348,7 @@ fn release_image(id: u32, transport: Transport, output: &mut impl Write) -> io::
 
 pub struct Kitty {
     transport: Transport,
-    transferred: HashMap<usize, (u32, std::sync::Arc<Image>)>,
+    transferred: HashMap<usize, (u32, Arc<Image>)>,
     placed: HashSet<u32>,
 }
 impl Default for Kitty {
@@ -359,8 +366,7 @@ impl Kitty {
     }
     pub fn clear_placements(&mut self, output: &mut impl Write) -> io::Result<()> {
         for id in self.placed.drain() {
-            self.transport
-                .control(output, &format!("\x1b_Ga=d,d=i,i={id},q=2\x1b\\"))?;
+            self.transport.control(output, &delete_command(id, false))?;
         }
         Ok(())
     }
@@ -377,7 +383,7 @@ impl Kitty {
             .is_some_and(|(id, ok)| !ok && self.transferred.values().any(|(own, _)| *own == id))
     }
     /// 画像を先に転送する。Unicodeセルはratatuiの差分管理に含める。
-    pub fn prepare(&mut self, app: &crate::app::App, output: &mut impl Write) -> io::Result<()> {
+    pub fn prepare(&mut self, app: &App, output: &mut impl Write) -> io::Result<()> {
         if app.help || app.too_small() || !app.graphics_active {
             self.reset();
             return Ok(());
@@ -390,13 +396,13 @@ impl Kitty {
             if !visible.insert(source) {
                 continue;
             }
-            let Some(crate::math::View::Ready(image)) = app.math_views.get(&source) else {
+            let Some(View::Ready(image)) = app.math_views.get(&source) else {
                 continue;
             };
             if self
                 .transferred
                 .get(&source)
-                .is_some_and(|(_, previous)| !std::sync::Arc::ptr_eq(previous, image))
+                .is_some_and(|(_, previous)| !Arc::ptr_eq(previous, image))
             {
                 let (id, _) = self.transferred.remove(&source).unwrap();
                 self.release(id, output)?;
@@ -460,7 +466,7 @@ impl Kitty {
         }
         output.flush()
     }
-    pub fn render_placeholders(&self, app: &crate::app::App, frame: &mut Frame) {
+    pub fn render_placeholders(&self, app: &App, frame: &mut Frame) {
         if self.transport != Transport::Tmux || app.help || app.too_small() || !app.graphics_active
         {
             return;
@@ -497,7 +503,7 @@ impl Kitty {
         }
     }
     /// 直接接続時だけ、本文描画後のカーソル座標へ画像を配置する。
-    pub fn draw(&mut self, app: &crate::app::App, output: &mut impl Write) -> io::Result<()> {
+    pub fn draw(&mut self, app: &App, output: &mut impl Write) -> io::Result<()> {
         if self.transport == Transport::Tmux || app.help || app.too_small() || !app.graphics_active
         {
             return Ok(());
@@ -550,9 +556,8 @@ impl Kitty {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{app::App, document::Document, math::View};
+    use crate::document::{Document, Kind};
     use ratatui::{Terminal, backend::TestBackend};
-    use std::sync::Arc;
 
     #[test]
     fn tmux_passthrough_escapes_each_escape_and_keeps_commands_separate() {
@@ -576,7 +581,7 @@ mod tests {
             .document
             .nodes
             .iter()
-            .find(|n| matches!(n.kind, crate::document::Kind::Math(_)))
+            .find(|n| matches!(n.kind, Kind::Math { .. }))
             .unwrap()
             .source
             .start;
@@ -587,7 +592,10 @@ mod tests {
             columns: 3,
             rows: 4,
         });
-        app.set_math(HashMap::from([(source, View::Ready(image.clone()))]), "");
+        app.set_math(
+            HashMap::from([(source, View::Ready(image.clone()))]),
+            Default::default(),
+        );
         let start = app
             .lines
             .iter()

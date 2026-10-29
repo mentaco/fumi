@@ -4,7 +4,7 @@ use fumi::{
     document::Document,
     input::{Decoder, InputEvent},
     layout::{layout, search_segments},
-    math::{self, Request, View},
+    math::{self, Request, Status, View},
     search,
 };
 use ratatui::{Terminal, backend::TestBackend, style::Modifier};
@@ -359,20 +359,23 @@ fn math_overlay_preserves_source_position_and_search_jump() {
     let source = app.document.source.find("$$").unwrap();
     let image = Arc::new(math::render(&request(r"\frac{1}{2}")).unwrap());
     app.graphics_active = true;
-    app.set_math([(source, View::Ready(image.clone()))].into(), "生成中");
+    app.set_math(
+        [(source, View::Ready(image.clone()))].into(),
+        Status::Pending,
+    );
     let row = app
         .lines
         .iter()
         .position(|l| l.image == Some((source, 1)))
         .unwrap();
     app.top = row;
-    app.set_math([(source, View::Ready(image.clone()))].into(), "updated");
+    app.set_math([(source, View::Ready(image.clone()))].into(), Status::Idle);
     assert_eq!(app.top, row);
     query(&mut app, "frac");
     assert_eq!(app.search.matches.len(), 1);
     assert!(app.lines.iter().any(|l| l.text() == "[math]"));
     app.graphics_active = false;
-    app.set_math(Default::default(), "画像非対応");
+    app.set_math(Default::default(), Status::Unavailable("画像非対応".into()));
     assert!(app.lines.iter().any(|l| l.text().contains("frac")));
 }
 
@@ -405,10 +408,10 @@ fn image_row_offset_survives_a_width_change_and_generation() {
     ));
     let image = Arc::new(math::render(&request(r"\frac{1}{2}")).unwrap());
     app.graphics_active = true;
-    app.set_math([(0, View::Ready(image.clone()))].into(), "生成中");
+    app.set_math([(0, View::Ready(image.clone()))].into(), Status::Pending);
     app.top = 1;
     app.resize(30, 8);
-    app.set_math([(0, View::Ready(image))].into(), "生成中");
+    app.set_math([(0, View::Ready(image))].into(), Status::Pending);
     assert_eq!(app.lines[app.top].image, Some((0, 1)));
 }
 
@@ -463,7 +466,7 @@ fn generation_update_at_tiny_size_does_not_reuse_a_tiny_layout_after_expansion()
     let mut app = app("$$ x $$\n\n日本語の文章を通常の幅で表示する。");
     let expected: Vec<_> = app.lines.iter().map(|line| line.text()).collect();
     app.resize(10, 2);
-    app.set_math(Default::default(), "生成中");
+    app.set_math(Default::default(), Status::Pending);
     app.resize(40, 8);
     assert_eq!(
         app.lines

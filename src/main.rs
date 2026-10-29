@@ -5,7 +5,7 @@ use fumi::{
     document::Document,
     profile,
     source::{load, sanitize},
-    terminal::{Signals, run},
+    terminal::{GraphicsOptions, Signals, run},
 };
 use std::{
     io::{self, IsTerminal, Write},
@@ -93,7 +93,12 @@ fn main() -> ExitCode {
     profile::mark("parse_ms");
     let app = App::new(document, &name, colors);
     profile::mark("app_ms");
-    match run(app, &signals, cli.graphics, cli.plain, colors) {
+    let options = GraphicsOptions {
+        mode: cli.graphics,
+        plain: cli.plain,
+        colors,
+    };
+    match run(app, &signals, options) {
         Ok(code) => ExitCode::from(code),
         Err(e) => error("端末", &e.to_string(), 1),
     }

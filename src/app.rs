@@ -1,6 +1,8 @@
 use crate::{
     document::Document,
-    layout::{DisplayLine, anchored_row, layout, truncate_middle},
+    layout::{DisplayLine, anchored_row, layout, search_segments, truncate_middle},
+    math::{Status, View},
+    search::{self, Search, Segment},
     source::sanitize,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind};
@@ -11,8 +13,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::Paragraph,
 };
-
-use crate::search::{self, Search, Segment};
+use std::{collections::HashMap, sync::Arc};
 use unicode_segmentation::UnicodeSegmentation;
 
 pub const HELP: &str = "# fumi 操作一覧\n\n読み取り専用Markdownビューア（v1）\n\nj / ↓ : 1表示行下\nk / ↑ : 1表示行上\nCtrl+d / Ctrl+u : 半画面下 / 上\nCtrl+f / PageDown : 1画面下（1行重複）\nCtrl+b / PageUp : 1画面上（1行重複）\ngg / Home : 先頭\nG / End : 末尾\n? : ヘルプを開閉\nq : ツールを終了（ヘルプ表示中も同じ）\nEsc : 検索語・ハイライトを解除、ヘルプから本文へ戻る\n/ : 検索入力（最大256書記素）\nn / N : 次 / 前の一致（循環）\nホイール : 3表示行上下\n検索中 Enter : 確定、Esc / Ctrl+c : 取消\n検索中 Backspace : 1書記素削除、Ctrl+u : 全消去\nCtrl+c : 割り込み終了（130）\nCtrl+z : 中断、fgで復帰\n\nヘルプでも移動できます。本文位置は変わりません。\nサイズ不足中はq / Ctrl+cで終了できます。\n\n--plain : 能力照会や画像を使わないテキストTUI\n--color auto|always|never : 色の指定\n--graphics auto|off|kitty : 数式画像の方式\n\n対応端末のブロック数式は画像、それ以外はTeXソースを表示します。\nMarkdown画像は代替テキストと参照先を表示します。\nリンクを開く操作はありません。";
@@ -31,8 +32,8 @@ pub struct App {
     pub search: Search,
     search_index: Option<Vec<Segment>>,
     pub graphics_active: bool,
-    pub math_views: std::collections::HashMap<usize, crate::math::View>,
-    pub math_reason: String,
+    pub math_views: HashMap<usize, View>,
+    pub math_status: Status,
     deferred_image_anchor: Option<(usize, usize)>,
     pub warning: String,
     pub help: bool,
@@ -57,8 +58,8 @@ impl App {
             search: Search::default(),
             search_index: None,
             graphics_active: false,
-            math_views: std::collections::HashMap::new(),
-            math_reason: String::new(),
+            math_views: HashMap::new(),
+            math_status: Default::default(),
             deferred_image_anchor: None,
             warning: String::new(),
             help: false,
@@ -237,7 +238,7 @@ impl App {
                 }
                 KeyCode::Char('/') if !self.help => {
                     self.search_index
-                        .get_or_insert_with(|| crate::layout::search_segments(&self.document));
+                        .get_or_insert_with(|| search_segments(&self.document));
                     self.search.input = Some(String::new());
                     self.search.candidates.clear();
                     self.search.limited = false;
@@ -301,20 +302,14 @@ impl App {
         Action::None
     }
 
-    pub fn set_math(
-        &mut self,
-        views: std::collections::HashMap<usize, crate::math::View>,
-        reason: &str,
-    ) -> bool {
-        let same = self.math_reason == reason
+    pub fn set_math(&mut self, views: HashMap<usize, View>, status: Status) -> bool {
+        let same = self.math_status == status
             && self.math_views.len() == views.len()
             && views
                 .iter()
                 .all(|(source, view)| match (view, self.math_views.get(source)) {
-                    (crate::math::View::Ready(a), Some(crate::math::View::Ready(b))) => {
-                        std::sync::Arc::ptr_eq(a, b)
-                    }
-                    (crate::math::View::Failed(a), Some(crate::math::View::Failed(b))) => a == b,
+                    (View::Ready(a), Some(View::Ready(b))) => Arc::ptr_eq(a, b),
+                    (View::Failed(a), Some(View::Failed(b))) => a == b,
                     _ => false,
                 });
         if same {
@@ -326,25 +321,23 @@ impl App {
             .get(self.top)
             .and_then(|l| l.image)
             .or(self.deferred_image_anchor);
-        if image_anchor.is_some() && reason == "生成中" {
+        if image_anchor.is_some() && status == Status::Pending {
             self.deferred_image_anchor = image_anchor;
         }
         self.math_views = views;
-        self.math_reason = reason.into();
+        self.math_status = status;
         if self.too_small() {
             self.layout_width = 0;
             return false;
         }
-        if !self.document.nodes.iter().any(
-            |n| matches!(&n.kind, crate::document::Kind::Math(s) if s.trim().starts_with("$$")),
-        ) {
+        if !self.document.has_display_math() {
             return false;
         }
         self.lines = layout(&self.document, self.body_width(), self.colors);
         self.overlay_math();
         self.top = anchored_row(&self.lines, anchor).min(self.max_top());
         if let Some((source, offset)) = image_anchor
-            && let Some(crate::math::View::Ready(image)) = self.math_views.get(&source)
+            && let Some(View::Ready(image)) = self.math_views.get(&source)
             && let Some(row) = self
                 .lines
                 .iter()
@@ -357,11 +350,7 @@ impl App {
     }
 
     fn overlay_math(&mut self) {
-        use crate::{document::Kind, math::View};
-        for node in self.document.nodes.iter().rev() {
-            if !matches!(&node.kind, Kind::Math(s) if s.trim().starts_with("$$")) {
-                continue;
-            }
+        for (node, _) in self.document.display_math().rev() {
             let Some(start) = self.lines.iter().position(|line| {
                 !line.source.is_empty() && node.source.contains(&line.source.start)
             }) else {
@@ -394,10 +383,10 @@ impl App {
                 }
                 value => {
                     let reason = match value {
-                        Some(View::Failed(reason)) => reason,
-                        _ => &self.math_reason,
+                        Some(View::Failed(reason)) => Some(reason.as_str()),
+                        _ => self.math_status.label(),
                     };
-                    if !reason.is_empty() {
+                    if let Some(reason) = reason.filter(|r| !r.is_empty()) {
                         self.lines.insert(end, label(format!("[math: {reason}]")));
                     }
                 }
