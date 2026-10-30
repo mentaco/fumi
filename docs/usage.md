@@ -7,7 +7,7 @@
 ```text
 fumi [OPTIONS] <FILE>
 
-      --plain                 能力照会・画像転送・拡大文字を無効化
+      --plain                 端末の画像対応の確認・画像転送・拡大文字を無効化
       --color <MODE>          auto / always / never（既定: auto）
       --graphics <MODE>       auto / off / kitty（既定: auto）
   -h, --help                  使い方を表示して終了
@@ -75,7 +75,7 @@ fumi ./-           # 名前がちょうど「-」のファイル
 - `--color auto`（既定）は、環境変数`NO_COLOR`が空でなければ色を使いません。`--color always` / `never`を明示した場合はそちらが優先されます。
 - 色がなくても、太字・下線・反転で見出しや検索結果を区別できます。
 - `--plain`でも色は使えます。色も消したい場合は`--plain --color never`とします。
-- `--graphics kitty`を指定しても、端末への能力照会は行います（照会に応答しない端末では画像になりません）。
+- `--graphics kitty`を指定しても、端末の画像対応の確認は行います（確認に応答しない端末では画像になりません）。
 
 数式が画像にならない場合や、tmuxでの動作は[数式・端末ガイド](terminal-graphics.md)を参照してください。
 

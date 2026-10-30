@@ -239,14 +239,14 @@ pub fn query(
     }
     if !supported && (mode == GraphicsMode::Auto || transport == Transport::Tmux) {
         return Ok(Err(if transport == Transport::Tmux {
-            "tmux画像照会無応答"
+            "tmuxで画像対応の確認に応答なし"
         } else {
-            "画像非対応・照会無応答"
+            "画像非対応・確認に応答なし"
         }
         .into()));
     }
     if !placeholders {
-        return Ok(Err("tmux用Unicode画像配置に未対応・照会無応答".into()));
+        return Ok(Err("tmux用Unicode画像配置に未対応・確認に応答なし".into()));
     }
     if cell.is_none()
         && let Ok(size) = crossterm::terminal::window_size()

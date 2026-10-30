@@ -38,7 +38,7 @@ class TmuxSession(Session):
 
     def __init__(self, socket, config, args):
         self.responded = 0
-        # tmux自身の初期能力照会が済んでからfumiを起動する。
+        # tmux自身が端末へ行う初期の問い合わせが済んでからfumiを起動する。
         launcher = "import os,sys,time; time.sleep(.4); os.execv(sys.argv[1],sys.argv[1:])"
         super().__init__(["-S", socket, "-f", config, "-u", "new-session", "-s", "fumi",
                           sys.executable, "-c", launcher, BINARY] + args,
@@ -90,9 +90,17 @@ def integration(initial=None, flags=(), no_math=False, lifecycle=True):
         session = TmuxSession(socket, str(config), list(flags) + [str(source)])
         try:
             until = time.monotonic() + 6
-            while (b"KITTY" if rich else b"TEXT") not in session.data:
+            # 照会前の初回フレームはTEXT。差分描画の出力ではなく、tmuxが保持するペインの画面で確かめる。
+            mode = "KITTY" if rich else "TEXT"
+            while True:
                 session.pump()
-                assert time.monotonic() < until, bytes(session.data)
+                try:
+                    status = tmux("capture-pane", "-p", "-t", "fumi:0.0").rstrip("\n").split("\n")[-1]
+                except subprocess.CalledProcessError:
+                    status = ""  # tmuxサーバーとペインの起動前。
+                if mode in status:
+                    break
+                assert time.monotonic() < until, status
             assert config.read_bytes() == before_config, "tmux設定ファイルが変更された"
             assert tmux("show-options", "-gv", "allow-passthrough").strip() == (initial or "off"), "グローバル設定が変更された"
             assert tmux("show-options", "-pAv", "-t", "fumi:0.0", "allow-passthrough").strip() == ("all" if rich else (initial or "off"))

@@ -124,7 +124,7 @@ impl Drop for Guard {
     }
 }
 
-/// 画像の照会と生成に使うCLI指定。
+/// 端末の画像対応の確認と画像生成に使うCLI指定。
 #[derive(Clone, Copy, Debug)]
 pub struct GraphicsOptions {
     pub mode: GraphicsMode,
@@ -143,6 +143,9 @@ pub fn run(mut app: App, signals: &Signals, options: GraphicsOptions) -> io::Res
     crate::profile::mark("terminal_ms");
     app.resize(size.width, size.height);
     crate::profile::mark("layout_ms");
+    // 端末の画像対応の確認の待ち時間で初回表示を遅らせないよう、確認前に本文をテキストで描く。
+    terminal.draw(|f| app.draw(f))?;
+    crate::profile::finish()?;
     let mut decoder = Decoder::default();
     let mut kitty = Kitty::default();
     let mut math = configure_graphics(&mut app, options, &mut decoder, None)?;

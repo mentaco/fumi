@@ -30,7 +30,7 @@ impl ColorMode {
 #[derive(Debug, Parser)]
 #[command(name = "fumi", version, about = "読み取り専用Markdownビューア", color = clap::ColorChoice::Never)]
 pub struct Cli {
-    /// 画像・数式画像化・拡大文字・能力照会を無効にする
+    /// 画像・数式画像化・拡大文字・端末の画像対応の確認を無効にする
     #[arg(long)]
     pub plain: bool,
     /// 本文装飾の色を指定する

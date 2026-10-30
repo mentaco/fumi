@@ -55,7 +55,8 @@ def started_kitty(session):
     while b"a=p" not in session.data:
         session.pump(.02)
         assert time.monotonic() < until, session.visible()
-    assert b"KITTY" in session.data
+    # 照会前の初回フレームはTEXT。差分描画で書き換わるため、再生した画面のステータス行で確かめる。
+    assert "KITTY" in session.screen()[-1], session.screen()[-1]
 
 
 def commands(session, since=0):
@@ -140,8 +141,12 @@ def fallback(args, extra_env=None, reply=None):
         if "--plain" in args or "off" in args or (extra_env and "STY" in extra_env):
             assert b"a=q" not in session.data
         assert b"a=t" not in session.data
+        # 初回フレームは照会前に出る。照会中のキーは保持され、判定後に処理される。
         session.send(b"G")
-        assert "unknownfumi" in session.visible()
+        until = time.monotonic() + 2
+        while "unknownfumi" not in session.visible():
+            session.pump(.02)
+            assert time.monotonic() < until, session.visible()
         session.send(b"q")
         session.wait(0)
         if "--plain" in args or "off" in args or not (extra_env and "TMUX" in extra_env):

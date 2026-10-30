@@ -18,6 +18,7 @@ import sys
 import tempfile
 import termios
 import time
+import unicodedata
 
 BINARY = str(Path(sys.argv[1] if len(sys.argv) > 1 else "target/debug/fumi").resolve())
 FIXTURE = Path(__file__).parent / "fixtures/representative.md"
@@ -132,6 +133,35 @@ class Session:
     def send(self, data):
         os.write(self.master, data)
         self.pump()
+
+    def screen(self):
+        """カーソル移動と文字出力を再生した現在の画面。差分描画で一部のセルだけ書き換えた文字列の確認に使う。"""
+        rows, cols = struct.unpack("HHHH", fcntl.ioctl(self.slave, termios.TIOCGWINSZ, b"\0" * 8))[:2]
+        grid = [[" "] * cols for _ in range(rows)]
+        y = x = 0
+        text = bytes(self.data).decode("utf-8", errors="replace")
+        token = re.compile(r"\x1b(?:\[([0-?]*)[ -/]*([@-~])|[\]_P^][\s\S]*?(?:\x07|\x1b\\)|[\s\S])|([\s\S])")
+        for match in token.finditer(text):
+            params, final, char = match[1], match[2], match[3]
+            if final == "H":
+                parts = [int(p) if p.isdigit() else 1 for p in (params or "").split(";")] + [1, 1]
+                y, x = parts[0] - 1, parts[1] - 1
+            elif final == "J" and params == "2":
+                grid = [[" "] * cols for _ in range(rows)]
+            elif char == "\r":
+                x = 0
+            elif char == "\n":
+                y += 1
+            elif char is not None and char.isprintable():
+                if unicodedata.combining(char):
+                    continue
+                width = 2 if unicodedata.east_asian_width(char) in "WF" else 1
+                if 0 <= y < rows and 0 <= x < cols:
+                    grid[y][x] = char
+                    if width == 2 and x + 1 < cols:
+                        grid[y][x + 1] = ""
+                x += width
+        return ["".join(row) for row in grid]
 
     def visible(self):
         return re.sub(rb"\x1b\[[0-?]*[ -/]*[@-~]", b"", bytes(self.data)).decode("utf-8", errors="replace")
