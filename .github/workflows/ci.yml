@@ -1,5 +1,18 @@
 name: fumi checks
-on: [push, pull_request]
+# 文書だけの変更では実行しない。tests/fixtures の .md はテスト入力なので除外しない
+on:
+  push:
+    paths-ignore:
+      - "*.md"
+      - "docs/**"
+      - "LICENSE"
+      - "licenses/**"
+  pull_request:
+    paths-ignore:
+      - "*.md"
+      - "docs/**"
+      - "LICENSE"
+      - "licenses/**"
 jobs:
   test:
     strategy:
