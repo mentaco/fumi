@@ -163,6 +163,7 @@ if __name__ == "__main__":
     print(subprocess.check_output([TMUX, "-V"]).decode().strip())
     case("実tmux: 設定なしで自動有効化・画像転送・ペイン分離・リサイズ・中断復帰・端末復旧", integration)
     case("実tmux: 明示offからkitty指定で自動有効化", lambda: integration("off", ["--graphics", "kitty"], lifecycle=False))
+    case("実tmux: 色なしでも画像IDの色を保持", lambda: integration(flags=["--color", "never"], lifecycle=False))
     case("実tmux: plainでは自動設定なし", lambda: integration("off", ["--plain"]))
     case("実tmux: graphics offでは自動設定なし", lambda: integration("off", ["--graphics", "off"]))
     case("実tmux: 数式なしでは自動設定なし", lambda: integration("off", no_math=True))

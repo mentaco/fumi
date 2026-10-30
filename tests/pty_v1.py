@@ -28,7 +28,7 @@ def unwrapped(data):
     return PASSTHROUGH.sub(lambda m: m[1].replace(b"\x1b\x1b", b"\x1b"), data)
 
 
-def respond(session, cell=(10, 20), background=True, malformed=False, supported=True, placeholders=True):
+def respond(session, cell=(10, 20), background=True, foreground=True, malformed=False, supported=True, placeholders=True):
     until = time.monotonic() + 5
     while b"a=q" not in session.data:
         session.pump(.01)
@@ -44,12 +44,13 @@ def respond(session, cell=(10, 20), background=True, malformed=False, supported=
         replies += b"\x1b[6;bad;20;10t"
     if background:
         replies += b"\x1b]11;rgb:1414/1414/1414\x1b\\"
-    replies += b"\x1b]10;rgb:ebeb/ebeb/ebeb\x1b\\"
+    if foreground:
+        replies += b"\x1b]10;rgb:ebeb/ebeb/ebeb\x1b\\"
     os.write(session.master, replies)
 
 
-def started_kitty(session):
-    respond(session)
+def started_kitty(session, **reply):
+    respond(session, **reply)
     session.send(b"/frac\r")
     until = time.monotonic() + 6
     while b"a=p" not in session.data:
@@ -157,6 +158,33 @@ def fallback(args, extra_env=None, reply=None):
         session.close()
 
 
+def background_unknown():
+    # 数式画像の背景は透明なので、文字色が分かれば背景色なしでも画像にする。
+    session = Session([V1], size=(80, 12))
+    try:
+        started_kitty(session, background=False)
+        assert any(fields.get(b"a") == b"t" for fields, _ in commands(session)), "画像が転送されていない"
+        session.send(b"q")
+        session.wait(0)
+    finally:
+        session.close()
+
+
+def tmux_color_never():
+    # 色なしでも、tmuxの画像IDはセルのRGB指定で伝える必要がある。本文には色を付けない。
+    session = Session(["--color", "never", V1], size=(80, 12), extra_env=mock_tmux_env({"TMUX": "test"}))
+    try:
+        started_kitty(session)
+        session.pump(.3)
+        data = bytes(session.data)
+        assert re.search(rb"\x1b\[38;2;\d+;\d+;\d+(?:;\d+)*m\xf4\x8e\xbb\xae", data), "画像IDの色がプレースホルダーに付いていない"
+        assert not re.search(rb"\x1b\[(?:[34]8;5;|48;2;|[34][0-7][;m])", data), "色なしで本文に色が付いた"
+        session.send(b"q")
+        session.wait(0)
+    finally:
+        session.close()
+
+
 def setup_failure(mode):
     start = time.monotonic()
     fallback([], {"TMUX": "test", "FUMI_TEST_TMUX_MODE": mode})
@@ -225,6 +253,7 @@ def run():
     case("無応答", lambda: fallback([]))
     case("tmux", lambda: fallback(["--graphics", "kitty"], {"TMUX": "test"}))
     case("tmuxパススルー・Unicode配置・上下クリッピング・復旧", lambda: graphics_lifecycle(tmux=True))
+    case("tmux 色なしでも画像IDの色を出力", tmux_color_never)
     case("tmux kitty指定でも応答必須", lambda: fallback(["--graphics", "kitty"], {"TMUX": "test"}, {"supported": False}))
     case("tmux Unicode仮想配置未対応", lambda: fallback([], {"TMUX": "test"}, {"placeholders": False}))
     case("tmux plain", lambda: fallback(["--plain"], {"TMUX": "test"}))
@@ -237,7 +266,8 @@ def run():
     case("screen", lambda: fallback([], {"STY": "test"}))
     case("セル寸法不明", lambda: fallback([], reply={"cell": None}))
     case("不正な寸法応答", lambda: fallback([], reply={"cell": None, "malformed": True}))
-    case("背景色不明", lambda: fallback([], reply={"background": False}))
+    case("背景色不明でも文字色で画像化", background_unknown)
+    case("文字色・背景色不明", lambda: fallback([], reply={"background": False, "foreground": False}))
     case("照会中の入力保持・遅延応答", query_keys_and_late_replies)
     case("転送失敗のテキスト復帰", transfer_failure)
     case("検索UTF-8・取消・貼付け・ホイール・復旧", input_and_mouse)

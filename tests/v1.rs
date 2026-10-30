@@ -31,7 +31,6 @@ fn request(tex: &str) -> Request {
         tex: tex.into(),
         width: 78,
         cell: (10, 20),
-        background: [20; 3],
         foreground: [235; 3],
         monochrome: false,
     }
@@ -441,8 +440,10 @@ fn reference_destinations_have_independent_precise_highlights() {
 
 #[test]
 fn color_never_removes_tex_color_commands_from_the_resulting_pixels() {
-    let mut req = request(r"\color{red}{x}");
+    // `\color`は後続にも効くため、暗い赤が式全体に広がる例にする。
+    let mut req = request(r"\color{red}{x} + y = z");
     req.monochrome = true;
+    req.foreground = [255; 3];
     let image = math::render(&req).unwrap();
     let mut reader = png::Decoder::new(std::io::Cursor::new(image.png))
         .read_info()
@@ -454,10 +455,39 @@ fn color_never_removes_tex_color_commands_from_the_resulting_pixels() {
         remainder.is_empty(),
         "RGBA画像のバイト数は4の倍数であること"
     );
+    // 透明でない画素はすべて文字色。赤を明るさでグレーにすると暗い背景で読めない。
     assert!(
         pixels
             .iter()
-            .all(|pixel| pixel[0] == pixel[1] && pixel[1] == pixel[2])
+            .filter(|pixel| pixel[3] > 0)
+            .all(|pixel| pixel[..3] == [255; 3])
+    );
+    assert!(pixels.iter().any(|pixel| pixel[3] == 255));
+}
+
+#[test]
+fn math_background_and_cell_padding_are_transparent() {
+    let image = math::render(&request(r"\frac{1}{2}")).unwrap();
+    let mut reader = png::Decoder::new(std::io::Cursor::new(image.png))
+        .read_info()
+        .unwrap();
+    let mut bytes = vec![0; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut bytes).unwrap();
+    assert_eq!(info.color_type, png::ColorType::Rgba);
+    let (pixels, remainder) = bytes[..info.buffer_size()].as_chunks::<4>();
+    assert!(remainder.is_empty());
+    // 左上は描画余白、右下はセル境界までの補完で、どちらも文字を含まない。
+    assert_eq!(pixels[0][3], 0, "背景が透明であること");
+    assert_eq!(
+        pixels[pixels.len() - 1][3],
+        0,
+        "セル境界の補完が透明であること"
+    );
+    assert!(
+        pixels
+            .iter()
+            .any(|pixel| pixel[3] == 255 && pixel[..3] == [235; 3]),
+        "文字は端末の文字色で不透明に描かれること"
     );
 }
 

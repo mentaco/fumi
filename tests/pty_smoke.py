@@ -356,7 +356,8 @@ def color_modes():
         try:
             session.started().send(b"q")
             session.wait(0)
-            colored = re.search(rb"\x1b\[(?:38;5;\d+|3[0-7])[;m]", session.data) is not None
+            # 256色・RGB・基本色の前景／背景。既定色へ戻す39/49は色付けに含めない。
+            colored = re.search(rb"\x1b\[(?:[34]8;[25];|[34][0-7][;m])", session.data) is not None
             assert colored == expected, (mode, no_color)
         finally:
             session.close()

@@ -81,8 +81,9 @@ fn main() -> ExitCode {
     let colors = cli
         .color
         .enabled(std::env::var_os("NO_COLOR").as_deref(), &term);
-    // crossterm自身もNO_COLORを参照するため、CLIで確定した優先順位を反映する。
-    crossterm::style::force_color_output(colors);
+    // 本文の色の有無はレイアウトとハイライトで決める。crossterm自身のNO_COLOR対応は
+    // tmuxの画像IDを伝えるセルのRGB指定まで消すため、常に色を出力できる状態にする。
+    crossterm::style::force_color_output(true);
     let name = cli
         .file
         .file_name()

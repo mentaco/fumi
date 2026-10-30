@@ -1,7 +1,7 @@
 //! 数式は同じバイナリの隔離ワーカーで処理し、UI側で期限・世代・容量を管理する。
 use crate::{
     document::Document,
-    graphics::{Capabilities, PLACEHOLDER_COLUMNS, Transport, ViewState, luminance},
+    graphics::{Capabilities, PLACEHOLDER_COLUMNS, Transport, ViewState},
     layout::anchored_row,
 };
 use serde::{Deserialize, Serialize};
@@ -23,7 +23,6 @@ pub struct Request {
     pub tex: String,
     pub width: usize,
     pub cell: (u16, u16),
-    pub background: [u8; 3],
     pub foreground: [u8; 3],
     pub monochrome: bool,
 }
@@ -139,7 +138,8 @@ pub fn render(request: &Request) -> Result<Image, String> {
         &ratex_render::RenderOptions {
             font_size,
             padding,
-            background_color: color(request.background),
+            // 背景は透明にし、端末の背景との合成は端末側に任せる。
+            background_color: Color::new(0.0, 0.0, 0.0, 0.0),
             ..Default::default()
         },
     )
@@ -169,19 +169,15 @@ pub fn render(request: &Request) -> Result<Image, String> {
             if x < width && y < height {
                 let at = (y as usize * width as usize + x as usize) * channels;
                 if request.monochrome {
-                    let gray = luminance([raw[at], raw[at + 1], raw[at + 2]]);
-                    padded.extend_from_slice(&[gray; 3]);
+                    // 背景は透明なので、透明度だけを残して全体を文字色で描く。
+                    // `\color`で暗い色を指定した部分も、本文と同じ明るさで読める。
+                    padded.extend_from_slice(&request.foreground);
                 } else {
                     padded.extend_from_slice(&raw[at..at + 3]);
                 }
                 padded.push(if channels == 4 { raw[at + 3] } else { 255 });
             } else {
-                padded.extend_from_slice(&[
-                    request.background[0],
-                    request.background[1],
-                    request.background[2],
-                    255,
-                ]);
+                padded.extend_from_slice(&[0; 4]);
             }
         }
     }
@@ -279,7 +275,6 @@ impl Manager {
                 width
             },
             cell: self.capabilities.cell,
-            background: self.capabilities.background,
             foreground: self.capabilities.foreground,
             monochrome: self.capabilities.monochrome,
         }
@@ -458,7 +453,6 @@ mod tests {
         Capabilities {
             transport: Transport::Direct,
             cell: (10, 20),
-            background: [0; 3],
             foreground: [255; 3],
             monochrome: false,
         }

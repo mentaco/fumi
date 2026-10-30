@@ -114,7 +114,6 @@ fn enable_tmux_passthrough(deadline: Instant) -> Result<(), &'static str> {
 pub struct Capabilities {
     pub transport: Transport,
     pub cell: (u16, u16),
-    pub background: [u8; 3],
     pub foreground: [u8; 3],
     pub monochrome: bool,
 }
@@ -223,12 +222,7 @@ pub fn query(
                 }
             }
         }
-        if supported
-            && placeholders
-            && cell.is_some()
-            && background.is_some()
-            && foreground.is_some()
-        {
+        if supported && placeholders && cell.is_some() && foreground.is_some() {
             break;
         }
     }
@@ -263,33 +257,34 @@ pub fn query(
     let Some(cell) = cell.filter(|(w, h)| *w > 0 && *h > 0 && *w <= 512 && *h <= 512) else {
         return Ok(Err("セル寸法不明".into()));
     };
-    let Some(mut background) = background else {
-        return Ok(Err("背景色不明".into()));
-    };
-    let mut foreground = foreground.unwrap_or_else(|| {
-        if luminance(background) > 128 {
+    // 数式画像の背景は透明にするため、必要なのは文字色だけ。
+    // 文字色を取得できない場合は、背景色に対して読める白か黒を選ぶ。
+    let contrast = |rgb: [u8; 3]| {
+        if luminance(rgb) > 128 {
             [0; 3]
         } else {
             [255; 3]
         }
-    });
+    };
+    let Some(mut foreground) = foreground.or_else(|| background.map(contrast)) else {
+        return Ok(Err("文字色不明".into()));
+    };
     if !colors {
-        background = [luminance(background); 3];
-        foreground = if luminance(background) > 128 {
-            [0; 3]
-        } else {
+        // 色なしでは文字色の明るさに合わせて白か黒にする。
+        foreground = if luminance(foreground) > 128 {
             [255; 3]
+        } else {
+            [0; 3]
         };
     }
     Ok(Ok(Capabilities {
         transport,
         cell,
-        background,
         foreground,
         monochrome: !colors,
     }))
 }
-pub(crate) fn luminance(rgb: [u8; 3]) -> u8 {
+fn luminance(rgb: [u8; 3]) -> u8 {
     ((u32::from(rgb[0]) * 299 + u32::from(rgb[1]) * 587 + u32::from(rgb[2]) * 114) / 1000) as u8
 }
 pub fn parse_color(reply: &str, index: u8) -> Option<[u8; 3]> {
