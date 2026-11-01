@@ -28,7 +28,6 @@ pub struct Node {
 #[derive(Debug)]
 pub struct Document {
     pub source: String,
-    pub line_starts: Vec<usize>,
     pub nodes: Vec<Node>,
 }
 
@@ -359,12 +358,6 @@ impl Document {
                 nodes.push(node);
             }
         }
-        let mut line_starts = vec![0];
-        line_starts.extend(source.match_indices('\n').map(|(i, _)| i + 1));
-        Self {
-            source,
-            line_starts,
-            nodes,
-        }
+        Self { source, nodes }
     }
 }

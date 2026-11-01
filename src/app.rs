@@ -16,8 +16,24 @@ use ratatui::{
 };
 use std::{collections::HashMap, sync::Arc};
 use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
-pub const HELP: &str = "# fumi 操作一覧\n\n読み取り専用Markdownビューア（v1）\n\nj / ↓ : 1表示行下\nk / ↑ : 1表示行上\nCtrl+d / Ctrl+u : 半画面下 / 上\nCtrl+f / PageDown : 1画面下（1行重複）\nCtrl+b / PageUp : 1画面上（1行重複）\ngg / Home : 先頭\nG / End : 末尾\n? : ヘルプを開閉\nq : ツールを終了（ヘルプ表示中も同じ）\nEsc : 検索語・ハイライトを解除、ヘルプから本文へ戻る\n/ : 検索入力（最大256書記素）\nn / N : 次 / 前の一致（循環）\nホイール : 3表示行上下\n検索中 Enter : 確定、Esc / Ctrl+c : 取消\n検索中 Backspace : 1書記素削除、Ctrl+u : 全消去\nCtrl+c : 割り込み終了（130）\nCtrl+z : 中断、fgで復帰\n\nヘルプでも移動できます。本文位置は変わりません。\nサイズ不足中はq / Ctrl+cで終了できます。\n\n--plain : 端末の画像対応の確認や画像を使わないテキストTUI\n--color auto|always|never : 色の指定\n--graphics auto|off|kitty : 数式画像の方式\n\n対応端末のブロック数式は画像、それ以外はTeXソースを表示します。\nMarkdown画像は代替テキストと参照先を表示します。\nリンクを開く操作はありません。";
+/// 本文とステータスを表示できる最小の端末サイズ。
+const MIN_WIDTH: u16 = 20;
+const MIN_HEIGHT: u16 = 4;
+/// 左右に1列ずつ余白を置く最小の端末幅。
+const MARGIN_WIDTH: u16 = 40;
+/// 検索語の上限（書記素）。
+const SEARCH_LIMIT: usize = 256;
+/// ホイール1回で動かす表示行数。
+const WHEEL_LINES: usize = 3;
+
+/// ヘルプの本文。操作の数値は定数から埋め込み、実装との食い違いを防ぐ。
+fn help_text() -> String {
+    format!(
+        "# fumi 操作一覧\n\n読み取り専用Markdownビューア（v1）\n\nj / ↓ : 1表示行下\nk / ↑ : 1表示行上\nCtrl+d / Ctrl+u : 半画面下 / 上\nCtrl+f / PageDown : 1画面下（1行重複）\nCtrl+b / PageUp : 1画面上（1行重複）\ngg / Home : 先頭\nG / End : 末尾\n? : ヘルプを開閉\nq : ツールを終了（ヘルプ表示中も同じ）\nEsc : 検索語・ハイライトを解除、ヘルプから本文へ戻る\n/ : 検索入力（最大{SEARCH_LIMIT}書記素）\nn / N : 次 / 前の一致（循環）\nホイール : {WHEEL_LINES}表示行上下\n検索中 Enter : 確定、Esc / Ctrl+c : 取消\n検索中 Backspace : 1書記素削除、Ctrl+u : 全消去\nCtrl+c : 割り込み終了（130）\nCtrl+z : 中断、fgで復帰\n\nヘルプでも移動できます。本文位置は変わりません。\nサイズ不足中はq / Ctrl+cで終了できます。\n\n--plain : 端末の画像対応の確認や画像を使わないテキストTUI\n--color auto|always|never : 色の指定\n--graphics auto|off|kitty : 数式画像の方式\n\n対応端末のブロック数式は画像、それ以外はTeXソースを表示します。\nMarkdown画像は代替テキストと参照先を表示します。\nリンクを開く操作はありません。"
+    )
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Action {
@@ -35,42 +51,77 @@ enum Scroll {
     Bottom,
 }
 
-/// 本文と独立した閲覧位置を持つヘルプ。
-struct Help {
+/// 文書・表示行・閲覧位置をまとめた画面。本文とヘルプは同じ操作で独立して動く。
+struct Pane {
     document: Document,
     lines: Vec<DisplayLine>,
     top: usize,
     pending_g: bool,
 }
 
-impl Help {
-    fn relayout(&mut self, width: usize, colors: bool) {
-        let anchor = source_anchor(&self.lines, self.top);
-        self.lines = layout(&self.document, width, colors);
-        self.top = anchored_row(&self.lines, anchor);
+impl Pane {
+    fn new(document: Document) -> Self {
+        Self {
+            document,
+            lines: Vec::new(),
+            top: 0,
+            pending_g: false,
+        }
     }
     fn max_top(&self, viewport: usize) -> usize {
         self.lines.len().saturating_sub(viewport)
     }
+    fn percentage(&self, viewport: usize) -> usize {
+        percentage(self.top, self.max_top(viewport))
+    }
+    /// 先頭行のソース位置。再レイアウト後の閲覧位置の基準にする。
+    fn anchor(&self) -> usize {
+        self.lines.get(self.top).map_or(0, |l| l.source.start)
+    }
+    /// 表示行を作り直したものへ替え、先頭行のソース位置へ戻す。
+    fn relayout(&mut self, lines: Vec<DisplayLine>, viewport: usize) {
+        let anchor = self.anchor();
+        self.lines = lines;
+        self.top = anchored_row(&self.lines, anchor).min(self.max_top(viewport));
+    }
+    fn clamp(&mut self, viewport: usize) {
+        self.top = self.top.min(self.max_top(viewport));
+    }
+    fn scroll(&mut self, scroll: Scroll, viewport: usize) {
+        let max = self.max_top(viewport);
+        self.top = match scroll {
+            Scroll::Down(n) => self.top.saturating_add(n).min(max),
+            Scroll::Up(n) => self.top.saturating_sub(n),
+            Scroll::Top => 0,
+            Scroll::Bottom => max,
+        };
+    }
+}
+
+/// 本文の文書の内容から作った状態。文書を差し替えたら既定値へ戻す（仕様3.1節）。
+#[derive(Default)]
+struct DocumentState {
+    /// 検索用の論理文字列とソース範囲。最初の検索で作る。
+    search_index: Option<Vec<Segment>>,
+    /// 数式ごとの生成結果。キーは数式のソース開始位置。
+    math_views: HashMap<usize, View>,
+    /// 画像の生成後に戻す閲覧位置。数式のソース開始位置と画像内の行。
+    deferred_image_anchor: Option<(usize, usize)>,
 }
 
 pub struct App {
-    pub document: Document,
-    pub lines: Vec<DisplayLine>,
-    pub top: usize,
-    pub search: Search,
-    search_index: Option<Vec<Segment>>,
-    pub graphics_active: bool,
-    pub math_views: HashMap<usize, View>,
-    pub math_status: Status,
-    deferred_image_anchor: Option<(usize, usize)>,
-    pub warning: String,
-    pub help: bool,
-    pub pending_g: bool,
-    help_view: Help,
+    body: Pane,
+    doc: DocumentState,
+    /// 検索語は文書を差し替えても残し、一致は新しい文書で求め直す（仕様3.1節）。
+    search: Search,
+    math_status: Status,
+    graphics_active: bool,
+    warning: String,
+    help_visible: bool,
+    help: Pane,
     layout_width: usize,
-    pub width: u16,
-    pub height: u16,
+    width: u16,
+    height: u16,
     colors: bool,
     name: String,
 }
@@ -78,24 +129,14 @@ pub struct App {
 impl App {
     pub fn new(document: Document, name: &str, colors: bool) -> Self {
         Self {
-            document,
-            lines: Vec::new(),
-            top: 0,
+            body: Pane::new(document),
+            doc: DocumentState::default(),
             search: Search::default(),
-            search_index: None,
-            graphics_active: false,
-            math_views: HashMap::new(),
             math_status: Default::default(),
-            deferred_image_anchor: None,
+            graphics_active: false,
             warning: String::new(),
-            help: false,
-            pending_g: false,
-            help_view: Help {
-                document: Document::parse(HELP.to_string()),
-                lines: Vec::new(),
-                top: 0,
-                pending_g: false,
-            },
+            help_visible: false,
+            help: Pane::new(Document::parse(help_text())),
             layout_width: 0,
             width: 0,
             height: 0,
@@ -104,14 +145,39 @@ impl App {
         }
     }
 
+    /// 本文の文書。
+    pub fn document(&self) -> &Document {
+        &self.body.document
+    }
+    /// 本文の表示行。
+    pub fn lines(&self) -> &[DisplayLine] {
+        &self.body.lines
+    }
+    /// 本文の先頭に表示する行。ヘルプ表示中も本文の位置を返す。
+    pub fn top(&self) -> usize {
+        self.body.top
+    }
+    pub fn search(&self) -> &Search {
+        &self.search
+    }
+    pub fn help_visible(&self) -> bool {
+        self.help_visible
+    }
+    /// 表示中の画面（本文またはヘルプ）が `gg` の2文字目を待っているか。
+    pub fn pending_g(&self) -> bool {
+        self.active().pending_g
+    }
+    pub fn size(&self) -> (u16, u16) {
+        (self.width, self.height)
+    }
     pub fn too_small(&self) -> bool {
-        self.width < 20 || self.height < 4
+        self.width < MIN_WIDTH || self.height < MIN_HEIGHT
     }
     pub fn viewport(&self) -> usize {
         usize::from(self.height.saturating_sub(1))
     }
     pub fn body_width(&self) -> usize {
-        usize::from(if self.width >= 40 {
+        usize::from(if self.width >= MARGIN_WIDTH {
             self.width - 2
         } else {
             self.width
@@ -119,65 +185,67 @@ impl App {
     }
     /// 本文の左端の列。40列以上では左右に1列ずつ余白を置く。
     fn left_margin(&self) -> u16 {
-        u16::from(self.width >= 40)
+        u16::from(self.width >= MARGIN_WIDTH)
     }
     pub fn view_state(&self) -> ViewState<'_> {
         ViewState {
-            lines: &self.lines,
-            top: self.top,
+            lines: &self.body.lines,
+            top: self.body.top,
             rows: self.viewport(),
             width: self.body_width(),
             left: self.left_margin(),
-            body_visible: !self.help && !self.too_small(),
-            images: self.graphics_active.then_some(&self.math_views),
+            body_visible: !self.help_visible && !self.too_small(),
+            images: self.graphics_active.then_some(&self.doc.math_views),
         }
     }
+    /// 本文の先頭行の最大値。
     pub fn max_top(&self) -> usize {
-        self.lines.len().saturating_sub(self.viewport())
+        self.body.max_top(self.viewport())
     }
+    /// 本文の閲覧位置の百分率。
     pub fn percentage(&self) -> usize {
-        percentage(self.top, self.max_top())
+        self.body.percentage(self.viewport())
+    }
+    /// 本文を指定の表示行へ移す。末尾を超える位置は末尾へ丸める。
+    pub fn scroll_to(&mut self, row: usize) {
+        self.doc.deferred_image_anchor = None;
+        self.body.top = row.min(self.max_top());
     }
 
+    fn active(&self) -> &Pane {
+        if self.help_visible {
+            &self.help
+        } else {
+            &self.body
+        }
+    }
+    fn active_mut(&mut self) -> &mut Pane {
+        if self.help_visible {
+            &mut self.help
+        } else {
+            &mut self.body
+        }
+    }
     fn top_image(&self) -> Option<(usize, usize)> {
-        self.lines.get(self.top).and_then(|l| l.image)
+        self.body.lines.get(self.body.top).and_then(|l| l.image)
     }
     fn clear_pending_g(&mut self) {
-        self.pending_g = false;
-        self.help_view.pending_g = false;
-    }
-    fn active_pending_g_mut(&mut self) -> &mut bool {
-        if self.help {
-            &mut self.help_view.pending_g
-        } else {
-            &mut self.pending_g
-        }
+        self.body.pending_g = false;
+        self.help.pending_g = false;
     }
 
     /// 表示中の画面（本文またはヘルプ）をスクロールする。
     fn scroll(&mut self, scroll: Scroll) {
         let viewport = self.viewport();
-        let (top, max) = if self.help {
-            let max = self.help_view.max_top(viewport);
-            (&mut self.help_view.top, max)
-        } else {
-            let max = self.max_top();
-            (&mut self.top, max)
-        };
-        *top = match scroll {
-            Scroll::Down(n) => top.saturating_add(n).min(max),
-            Scroll::Up(n) => top.saturating_sub(n),
-            Scroll::Top => 0,
-            Scroll::Bottom => max,
-        };
+        self.active_mut().scroll(scroll, viewport);
     }
 
     /// 本文の表示行を作り直し、先頭行のソース位置へ戻す。
     fn relayout(&mut self) {
-        let anchor = source_anchor(&self.lines, self.top);
-        self.lines = layout(&self.document, self.body_width(), self.colors);
-        self.overlay_math();
-        self.top = anchored_row(&self.lines, anchor).min(self.max_top());
+        let lines = layout(&self.body.document, self.body_width(), self.colors);
+        let lines = self.overlay_math(lines);
+        let viewport = self.viewport();
+        self.body.relayout(lines, viewport);
     }
 
     pub fn resize(&mut self, width: u16, height: u16) {
@@ -186,28 +254,27 @@ impl App {
         }
         // 幅が変わると画像は作り直しになるため、画像内の行は生成後に復元する。
         if let Some(image) = self.top_image() {
-            self.deferred_image_anchor = Some(image);
+            self.doc.deferred_image_anchor = Some(image);
         }
         self.width = width;
         self.height = height;
         if self.too_small() {
             self.search.input = None;
-            self.help = false;
+            self.help_visible = false;
             self.clear_pending_g();
             return;
         }
         let body_width = self.body_width();
+        let viewport = self.viewport();
         if self.layout_width != body_width {
-            self.math_views.clear();
+            self.doc.math_views.clear();
             self.relayout();
-            self.help_view.relayout(body_width, self.colors);
+            let lines = layout(&self.help.document, body_width, self.colors);
+            self.help.relayout(lines, viewport);
             self.layout_width = body_width;
         }
-        self.top = self.top.min(self.max_top());
-        self.help_view.top = self
-            .help_view
-            .top
-            .min(self.help_view.max_top(self.viewport()));
+        self.body.clamp(viewport);
+        self.help.clamp(viewport);
     }
 
     pub fn key(&mut self, key: KeyEvent) -> Action {
@@ -273,7 +340,7 @@ impl App {
 
     /// 本文・ヘルプの閲覧中の操作。
     fn view_key(&mut self, ctrl: bool, code: KeyCode) -> Action {
-        let pending = self.active_pending_g_mut();
+        let pending = &mut self.active_mut().pending_g;
         if *pending {
             *pending = false;
             if !ctrl && code == KeyCode::Esc {
@@ -286,9 +353,9 @@ impl App {
         }
         if !ctrl {
             match code {
-                KeyCode::Esc if self.help => {
-                    self.help = false;
-                    self.help_view.pending_g = false;
+                KeyCode::Esc if self.help_visible => {
+                    self.help_visible = false;
+                    self.help.pending_g = false;
                     return Action::None;
                 }
                 KeyCode::Char('q') => return Action::Exit(0),
@@ -297,31 +364,32 @@ impl App {
                     return Action::None;
                 }
                 KeyCode::Char('?') => {
-                    self.help = !self.help;
+                    self.help_visible = !self.help_visible;
                     self.clear_pending_g();
-                    self.help_view.top = 0;
+                    self.help.top = 0;
                     return Action::None;
                 }
-                KeyCode::Char('/') if !self.help => {
-                    self.search_index
-                        .get_or_insert_with(|| search_segments(&self.document));
+                KeyCode::Char('/') if !self.help_visible => {
+                    self.doc
+                        .search_index
+                        .get_or_insert_with(|| search_segments(&self.body.document));
                     self.search.input = Some(String::new());
                     self.search.candidates.clear();
                     self.search.limited = false;
                     return Action::None;
                 }
-                KeyCode::Char('n' | 'N') if !self.help => {
+                KeyCode::Char('n' | 'N') if !self.help_visible => {
                     self.next_match(code == KeyCode::Char('N'));
                     return Action::None;
                 }
                 KeyCode::Char('g') => {
-                    *self.active_pending_g_mut() = true;
+                    self.active_mut().pending_g = true;
                     return Action::None;
                 }
                 _ => {}
             }
         }
-        self.deferred_image_anchor = None;
+        self.doc.deferred_image_anchor = None;
         let v = self.viewport();
         let half = (v / 2).max(1);
         let page = v.saturating_sub(1).max(1);
@@ -342,78 +410,96 @@ impl App {
 
     pub fn set_math(&mut self, views: HashMap<usize, View>, status: Status) -> bool {
         let same = self.math_status == status
-            && self.math_views.len() == views.len()
-            && views
-                .iter()
-                .all(|(source, view)| match (view, self.math_views.get(source)) {
+            && self.doc.math_views.len() == views.len()
+            && views.iter().all(
+                |(source, view)| match (view, self.doc.math_views.get(source)) {
                     (View::Ready(a), Some(View::Ready(b))) => Arc::ptr_eq(a, b),
                     (View::Failed(a), Some(View::Failed(b))) => a == b,
                     _ => false,
-                });
+                },
+            );
         if same {
             return false;
         }
-        let image_anchor = self.top_image().or(self.deferred_image_anchor);
+        let image_anchor = self.top_image().or(self.doc.deferred_image_anchor);
         if image_anchor.is_some() && status == Status::Pending {
-            self.deferred_image_anchor = image_anchor;
+            self.doc.deferred_image_anchor = image_anchor;
         }
-        self.math_views = views;
+        self.doc.math_views = views;
         self.math_status = status;
         if self.too_small() {
             self.layout_width = 0;
             return false;
         }
-        if !self.document.has_display_math() {
+        if !self.body.document.has_display_math() {
             return false;
         }
         self.relayout();
         if let Some((source, offset)) = image_anchor
-            && let Some(View::Ready(image)) = self.math_views.get(&source)
-            && let Some(row) = self
-                .lines
-                .iter()
-                .position(|l| l.image == Some((source, offset.min(image.rows.saturating_sub(1)))))
+            && let Some(View::Ready(image)) = self.doc.math_views.get(&source)
+            && let Some(row) =
+                self.body.lines.iter().position(|l| {
+                    l.image == Some((source, offset.min(image.rows.saturating_sub(1))))
+                })
         {
-            self.top = row.min(self.max_top());
-            self.deferred_image_anchor = None;
+            self.body.top = row.min(self.max_top());
+            self.doc.deferred_image_anchor = None;
         }
         true
     }
 
-    fn overlay_math(&mut self) {
-        for (node, _) in self.document.display_math().rev() {
-            let Some(start) = self.lines.iter().position(|line| {
-                !line.source.is_empty() && node.source.contains(&line.source.start)
-            }) else {
+    /// 画像表示を始める。数式は生成を待つ状態から表示し直す。
+    pub fn enable_graphics(&mut self) {
+        self.graphics_active = true;
+        self.warning.clear();
+        self.set_math(HashMap::new(), Status::Pending);
+    }
+
+    /// 画像表示をやめ、ブロック数式をTeX表示へ戻す。`reason` は数式に付ける理由で、
+    /// `warn` が真ならステータスにも警告として出す。
+    pub fn disable_graphics(&mut self, reason: String, warn: bool) {
+        self.graphics_active = false;
+        self.warning = if warn { reason.clone() } else { String::new() };
+        self.set_math(HashMap::new(), Status::Unavailable(reason));
+    }
+
+    /// ブロック数式の表示行を、画像の行またはTeXと理由のラベルにする。
+    fn overlay_math(&self, lines: Vec<DisplayLine>) -> Vec<DisplayLine> {
+        // 数式も表示行もソース順に並ぶ。前の数式の後ろから探せば、全体を一度の走査で済む。
+        let mut edits = Vec::new();
+        let mut cursor = 0;
+        for (node, _) in self.body.document.display_math() {
+            let Some(start) = lines[cursor..]
+                .iter()
+                .position(|line| {
+                    !line.source.is_empty() && node.source.contains(&line.source.start)
+                })
+                .map(|i| cursor + i)
+            else {
                 continue;
             };
-            let end = self.lines[start..]
+            let end = lines[start..]
                 .iter()
                 .position(|line| line.source.start >= node.source.end)
-                .map_or(self.lines.len(), |i| start + i);
-            let label = |text: String| DisplayLine {
-                mappings: vec![Mapping {
+                .map_or(lines.len(), |i| start + i);
+            cursor = end;
+            let label = |text: String| {
+                let mappings = vec![Mapping {
                     text: 0..text.len(),
                     source: node.source.clone(),
-                }],
-                line: Line::raw(text),
-                source: node.source.clone(),
-                image: None,
-                destinations: Vec::new(),
+                }];
+                DisplayLine::new(Line::raw(text), node.source.clone(), mappings)
             };
-            match self.math_views.get(&node.source.start) {
+            match self.doc.math_views.get(&node.source.start) {
                 Some(View::Ready(image)) if self.graphics_active => {
                     let mut replacement: Vec<_> = (0..image.rows)
                         .map(|offset| DisplayLine {
-                            line: Line::raw(""),
-                            source: node.source.clone(),
-                            mappings: Vec::new(),
                             image: Some((node.source.start, offset)),
-                            destinations: Vec::new(),
+                            ..DisplayLine::new(Line::raw(""), node.source.clone(), Vec::new())
                         })
                         .collect();
                     replacement.push(label("[math]".into()));
-                    self.lines.splice(start..end, replacement);
+                    edits.push((start..end, replacement));
                 }
                 value => {
                     let reason = match value {
@@ -421,17 +507,31 @@ impl App {
                         _ => self.math_status.label(),
                     };
                     if let Some(reason) = reason.filter(|r| !r.is_empty()) {
-                        self.lines.insert(end, label(format!("[math: {reason}]")));
+                        edits.push((end..end, vec![label(format!("[math: {reason}]"))]));
                     }
                 }
             }
         }
+        if edits.is_empty() {
+            return lines;
+        }
+        let mut result = Vec::with_capacity(lines.len() + edits.len());
+        let mut lines = lines.into_iter();
+        let mut position = 0;
+        for (range, replacement) in edits {
+            result.extend(lines.by_ref().take(range.start - position));
+            lines.by_ref().take(range.len()).for_each(drop);
+            result.extend(replacement);
+            position = range.end;
+        }
+        result.extend(lines);
+        result
     }
 
     fn refresh_candidates(&mut self) {
         self.search.limited = false;
         self.search.candidates = search::find(
-            self.search_index.as_deref().unwrap_or(&[]),
+            self.doc.search_index.as_deref().unwrap_or(&[]),
             self.search.input.as_deref().unwrap_or(""),
         );
     }
@@ -446,7 +546,7 @@ impl App {
             // 結合文字を追加入力した場合も、結合後の書記素数で判定する。
             let length = input.len();
             input.push_str(g);
-            if input.graphemes(true).count() > 256 {
+            if input.graphemes(true).count() > SEARCH_LIMIT {
                 input.truncate(length);
                 limited = true;
                 break;
@@ -457,17 +557,17 @@ impl App {
     }
 
     fn confirm_search(&mut self) {
-        self.deferred_image_anchor = None;
+        self.doc.deferred_image_anchor = None;
         let input = self.search.input.take().unwrap_or_default();
         if !input.is_empty() {
             self.search.query = input;
         }
         self.search.matches = search::find(
-            self.search_index.as_deref().unwrap_or(&[]),
+            self.doc.search_index.as_deref().unwrap_or(&[]),
             &self.search.query,
         );
         self.search.index_destinations();
-        let anchor = source_anchor(&self.lines, self.top);
+        let anchor = self.body.anchor();
         self.search.wrapped = false;
         self.search.current = if self.search.matches.is_empty() {
             None
@@ -480,7 +580,7 @@ impl App {
     }
 
     fn next_match(&mut self, previous: bool) {
-        self.deferred_image_anchor = None;
+        self.doc.deferred_image_anchor = None;
         let count = self.search.matches.len();
         if count == 0 {
             return;
@@ -501,9 +601,9 @@ impl App {
 
     fn reveal_match(&mut self) {
         if let Some(m) = self.search.current.and_then(|i| self.search.matches.get(i)) {
-            let row = anchored_row(&self.lines, m.start());
-            if row < self.top || row >= self.top + self.viewport() {
-                self.top = row.min(self.max_top());
+            let row = anchored_row(&self.body.lines, m.start());
+            if row < self.body.top || row >= self.body.top + self.viewport() {
+                self.body.top = row.min(self.max_top());
             }
         }
     }
@@ -512,10 +612,10 @@ impl App {
         if self.too_small() || self.search.input.is_some() {
             return;
         }
-        self.deferred_image_anchor = None;
+        self.doc.deferred_image_anchor = None;
         match event.kind {
-            MouseEventKind::ScrollDown => self.scroll(Scroll::Down(3)),
-            MouseEventKind::ScrollUp => self.scroll(Scroll::Up(3)),
+            MouseEventKind::ScrollDown => self.scroll(Scroll::Down(WHEEL_LINES)),
+            MouseEventKind::ScrollUp => self.scroll(Scroll::Up(WHEEL_LINES)),
             _ => {}
         }
     }
@@ -581,41 +681,31 @@ impl App {
     pub fn status(&self) -> String {
         let width = usize::from(self.width);
         if let Some(input) = &self.search.input {
-            let suffix = format!(
-                "  {}件{}",
-                self.search.candidates.len(),
-                if self.search.limited {
-                    " 上限256書記素"
-                } else {
-                    ""
-                }
-            );
+            let limited = if self.search.limited {
+                format!(" 上限{SEARCH_LIMIT}書記素")
+            } else {
+                String::new()
+            };
+            let suffix = format!("  {}件{limited}", self.search.candidates.len());
             return format!(
                 "/{}{}",
-                truncate_middle(input, width.saturating_sub(1 + suffix.width_cells())),
+                truncate_middle(input, width.saturating_sub(1 + suffix.width())),
                 suffix
             );
         }
-        let (position, pending) = if self.help {
-            let help = &self.help_view;
-            (
-                percentage(help.top, help.max_top(self.viewport())),
-                help.pending_g,
-            )
-        } else {
-            (self.percentage(), self.pending_g)
-        };
-        let percentage = format!("{position}%");
-        let base_extras = if self.help && pending {
+        let pane = self.active();
+        let percentage = format!("{}%", pane.percentage(self.viewport()));
+        let pending = pane.pending_g;
+        let base_extras = if self.help_visible && pending {
             " HELP g待ち"
-        } else if self.help {
+        } else if self.help_visible {
             " HELP"
         } else if pending {
             " g待ち"
         } else {
             " ? ヘルプ"
         };
-        let search_status = if !self.help && !self.search.query.is_empty() {
+        let search_status = if !self.help_visible && !self.search.query.is_empty() {
             if self.search.matches.is_empty() {
                 " 見つかりません".into()
             } else {
@@ -650,10 +740,10 @@ impl App {
             format!(" {mode} {percentage}"),
             format!(" {percentage}"),
         ] {
-            if suffix.width_cells() <= width {
+            if suffix.width() <= width {
                 return format!(
                     "{}{}",
-                    truncate_middle(&self.name, width - suffix.width_cells()),
+                    truncate_middle(&self.name, width - suffix.width()),
                     suffix
                 );
             }
@@ -666,7 +756,7 @@ impl App {
         if self.too_small() {
             frame.render_widget(
                 Paragraph::new(truncate_middle(
-                    "端末サイズ不足 (20×4以上)",
+                    &format!("端末サイズ不足 ({MIN_WIDTH}×{MIN_HEIGHT}以上)"),
                     usize::from(area.width),
                 )),
                 Rect::new(0, 0, area.width, area.height.min(1)),
@@ -679,17 +769,14 @@ impl App {
             self.body_width() as u16,
             self.height - 1,
         );
-        let (lines, top) = if self.help {
-            (&self.help_view.lines, self.help_view.top)
-        } else {
-            (&self.lines, self.top)
-        };
-        let text: Vec<_> = lines
+        let pane = self.active();
+        let text: Vec<_> = pane
+            .lines
             .iter()
-            .skip(top)
+            .skip(pane.top)
             .take(self.viewport())
             .map(|l| {
-                if self.help {
+                if self.help_visible {
                     l.line.clone()
                 } else {
                     self.highlight_line(l)
@@ -704,21 +791,7 @@ impl App {
     }
 }
 
-/// 先頭行のソース位置。再レイアウト後の閲覧位置の基準にする。
-fn source_anchor(lines: &[DisplayLine], top: usize) -> usize {
-    lines.get(top).map_or(0, |l| l.source.start)
-}
-
 /// 末尾位置を100%とする百分率。スクロール不要な場合も100%。
 fn percentage(top: usize, max_top: usize) -> usize {
     (100 * top).checked_div(max_top).unwrap_or(100)
-}
-
-trait WidthCells {
-    fn width_cells(&self) -> usize;
-}
-impl WidthCells for str {
-    fn width_cells(&self) -> usize {
-        unicode_width::UnicodeWidthStr::width(self)
-    }
 }

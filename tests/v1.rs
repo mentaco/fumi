@@ -71,36 +71,36 @@ fn logical_search_respects_boundaries_and_generated_markers() {
 fn search_input_preview_cancel_confirm_cycle_and_resize() {
     let mut app = app(&("日本語 hello **world** hello\n\n".repeat(25)));
     query(&mut app, "hello world");
-    assert_eq!(app.search.matches.len(), 25);
-    let matches: Vec<_> = app.search.matches.iter().map(|m| m.start()).collect();
+    assert_eq!(app.search().matches.len(), 25);
+    let matches: Vec<_> = app.search().matches.iter().map(|m| m.start()).collect();
     key(&mut app, KeyCode::Char('N'));
-    assert_eq!(app.search.current, Some(24));
-    assert!(app.search.wrapped);
-    let top = app.top;
+    assert_eq!(app.search().current, Some(24));
+    assert!(app.search().wrapped);
+    let top = app.top();
     key(&mut app, KeyCode::Char('/'));
     app.paste("q日本語");
-    assert_eq!(app.top, top);
-    assert_eq!(app.search.matches.len(), 25);
+    assert_eq!(app.top(), top);
+    assert_eq!(app.search().matches.len(), 25);
     assert_eq!(ctrl(&mut app, 'c'), Action::None);
-    assert_eq!(app.search.query, "hello world");
-    assert_eq!(app.top, top);
+    assert_eq!(app.search().query, "hello world");
+    assert_eq!(app.top(), top);
     key(&mut app, KeyCode::Char('n'));
-    assert_eq!(app.search.current, Some(0));
+    assert_eq!(app.search().current, Some(0));
     app.resize(20, 5);
     assert_eq!(
         matches,
-        app.search
+        app.search()
             .matches
             .iter()
             .map(|m| m.start())
             .collect::<Vec<_>>()
     );
     query(&mut app, "missing");
-    let top = app.top;
+    let top = app.top();
     assert!(app.status().contains("見つかりません"));
-    assert_eq!(app.top, top);
+    assert_eq!(app.top(), top);
     query(&mut app, "");
-    assert_eq!(app.search.query, "missing");
+    assert_eq!(app.search().query, "missing");
 }
 #[test]
 fn search_grapheme_limit_backspace_paste_and_modes() {
@@ -108,68 +108,68 @@ fn search_grapheme_limit_backspace_paste_and_modes() {
     key(&mut app, KeyCode::Char('/'));
     app.paste(&"e\u{301}".repeat(256));
     app.paste("x");
-    assert!(app.search.limited);
+    assert!(app.search().limited);
     assert!(app.status().contains("256"));
     key(&mut app, KeyCode::Backspace);
     app.paste("👩‍💻\n\r\x1b\0");
-    assert!(!app.search.limited);
-    assert!(app.search.input.as_ref().unwrap().ends_with("👩‍💻"));
+    assert!(!app.search().limited);
+    assert!(app.search().input.as_ref().unwrap().ends_with("👩‍💻"));
     ctrl(&mut app, 'u');
-    assert_eq!(app.search.input.as_deref(), Some(""));
+    assert_eq!(app.search().input.as_deref(), Some(""));
     key(&mut app, KeyCode::Char('q'));
-    assert_eq!(app.search.input.as_deref(), Some("q"));
+    assert_eq!(app.search().input.as_deref(), Some("q"));
     app.resize(10, 2);
-    assert!(app.search.input.is_none());
+    assert!(app.search().input.is_none());
     app.resize(40, 8);
     key(&mut app, KeyCode::Char('?'));
     key(&mut app, KeyCode::Char('/'));
-    assert!(app.search.input.is_none());
+    assert!(app.search().input.is_none());
 }
 #[test]
 fn escape_cancels_input_and_modes_before_ending_search() {
     let mut app = app(&"[hello](https://example.com)\n\n".repeat(25));
     query(&mut app, "example.com");
     key(&mut app, KeyCode::Char('N'));
-    let top = app.top;
-    let current = app.search.current;
-    assert!(app.search.wrapped);
-    assert!(!app.search.destination_matches.is_empty());
+    let top = app.top();
+    let current = app.search().current;
+    assert!(app.search().wrapped);
+    assert!(!app.search().destination_matches.is_empty());
 
     key(&mut app, KeyCode::Char('/'));
     app.paste("missing");
     assert_eq!(key(&mut app, KeyCode::Esc), Action::None);
-    assert!(app.search.input.is_none());
-    assert_eq!(app.search.query, "example.com");
-    assert_eq!(app.search.current, current);
-    assert_eq!(app.top, top);
+    assert!(app.search().input.is_none());
+    assert_eq!(app.search().query, "example.com");
+    assert_eq!(app.search().current, current);
+    assert_eq!(app.top(), top);
 
     key(&mut app, KeyCode::Char('?'));
     assert_eq!(key(&mut app, KeyCode::Esc), Action::None);
-    assert!(!app.help);
-    assert_eq!(app.search.current, current);
+    assert!(!app.help_visible());
+    assert_eq!(app.search().current, current);
     key(&mut app, KeyCode::Char('g'));
     assert_eq!(key(&mut app, KeyCode::Esc), Action::None);
-    assert!(!app.pending_g);
-    assert_eq!(app.search.current, current);
+    assert!(!app.pending_g());
+    assert_eq!(app.search().current, current);
 
     assert_eq!(key(&mut app, KeyCode::Esc), Action::None);
-    assert!(app.search.query.is_empty());
-    assert!(app.search.matches.is_empty());
-    assert!(app.search.current.is_none());
-    assert!(app.search.destination_matches.is_empty());
-    assert!(!app.search.wrapped);
+    assert!(app.search().query.is_empty());
+    assert!(app.search().matches.is_empty());
+    assert!(app.search().current.is_none());
+    assert!(app.search().destination_matches.is_empty());
+    assert!(!app.search().wrapped);
     assert!(!app.status().contains("example.com"));
     for code in [KeyCode::Char('n'), KeyCode::Char('N'), KeyCode::Esc] {
         assert_eq!(key(&mut app, code), Action::None);
-        assert_eq!(app.top, top);
+        assert_eq!(app.top(), top);
     }
     query(&mut app, "");
-    assert!(app.search.matches.is_empty());
-    assert_eq!(app.top, top);
+    assert!(app.search().matches.is_empty());
+    assert_eq!(app.top(), top);
     app.resize(80, 8);
-    assert!(app.search.matches.is_empty());
+    assert!(app.search().matches.is_empty());
     query(&mut app, "hello");
-    assert_eq!(app.search.matches.len(), 25);
+    assert_eq!(app.search().matches.len(), 25);
     assert_eq!(key(&mut app, KeyCode::Char('q')), Action::Exit(0));
 }
 #[test]
@@ -182,9 +182,9 @@ fn escape_clears_no_match_search_and_search_in_small_terminal() {
         assert_eq!(key(&mut app, KeyCode::Esc), Action::None);
         app.resize(40, 8);
         assert!(!app.status().contains("見つかりません"));
-        assert!(app.search.query.is_empty());
+        assert!(app.search().query.is_empty());
         assert_eq!(key(&mut app, KeyCode::Esc), Action::None);
-        assert_eq!(app.top, 0);
+        assert_eq!(app.top(), 0);
     }
 }
 #[test]
@@ -281,10 +281,10 @@ fn wheel_scrolls_three_rows_and_search_input_does_not_move() {
         modifiers: KeyModifiers::NONE,
     };
     app.mouse(mouse);
-    assert_eq!(app.top, 3);
+    assert_eq!(app.top(), 3);
     key(&mut app, KeyCode::Char('/'));
     app.mouse(mouse);
-    assert_eq!(app.top, 3);
+    assert_eq!(app.top(), 3);
 }
 #[test]
 fn decoder_separates_fragmented_delayed_replies_and_preserves_keys() {
@@ -355,27 +355,26 @@ fn math_overlay_preserves_source_position_and_search_jump() {
         "before\n\n$$ \\frac{{1}}{{2}} $$\n\n{}",
         "after\n\n".repeat(30)
     ));
-    let source = app.document.source.find("$$").unwrap();
+    let source = app.document().source.find("$$").unwrap();
     let image = Arc::new(math::render(&request(r"\frac{1}{2}")).unwrap());
-    app.graphics_active = true;
+    app.enable_graphics();
     app.set_math(
         [(source, View::Ready(image.clone()))].into(),
         Status::Pending,
     );
     let row = app
-        .lines
+        .lines()
         .iter()
         .position(|l| l.image == Some((source, 1)))
         .unwrap();
-    app.top = row;
+    app.scroll_to(row);
     app.set_math([(source, View::Ready(image.clone()))].into(), Status::Idle);
-    assert_eq!(app.top, row);
+    assert_eq!(app.top(), row);
     query(&mut app, "frac");
-    assert_eq!(app.search.matches.len(), 1);
-    assert!(app.lines.iter().any(|l| l.text() == "[math]"));
-    app.graphics_active = false;
-    app.set_math(Default::default(), Status::Unavailable("画像非対応".into()));
-    assert!(app.lines.iter().any(|l| l.text().contains("frac")));
+    assert_eq!(app.search().matches.len(), 1);
+    assert!(app.lines().iter().any(|l| l.text() == "[math]"));
+    app.disable_graphics("画像非対応".into(), false);
+    assert!(app.lines().iter().any(|l| l.text().contains("frac")));
 }
 
 #[test]
@@ -387,15 +386,73 @@ fn table_search_anchors_to_the_row_containing_the_cell() {
     let mut app = app(&source);
     query(&mut app, "cell40");
     assert!(
-        app.lines[app.top..app.top + app.viewport()]
+        app.lines()[app.top()..app.top() + app.viewport()]
             .iter()
             .any(|line| line.text().contains("cell40"))
     );
     app.resize(20, 8);
     assert!(
-        app.lines[app.top..app.top + app.viewport()]
+        app.lines()[app.top()..app.top() + app.viewport()]
             .iter()
             .any(|line| line.text().contains("cell40"))
+    );
+}
+
+#[test]
+fn several_formulas_keep_document_order_with_images_and_reasons() {
+    let mut app = app("a\n\n$$ x $$\n\nb\n\n$$ y $$\n\nc\n\n$$ z $$\n\nd");
+    let sources: Vec<_> = app
+        .document()
+        .display_math()
+        .map(|(node, _)| node.source.start)
+        .collect();
+    assert_eq!(sources.len(), 3);
+    let image = Arc::new(math::Image {
+        png: Vec::new(),
+        width: 30,
+        height: 40,
+        columns: 3,
+        rows: 2,
+    });
+    app.enable_graphics();
+    app.set_math(
+        [
+            (sources[0], View::Ready(image.clone())),
+            (sources[1], View::Failed("幅超過".into())),
+            (sources[2], View::Ready(image)),
+        ]
+        .into(),
+        Status::Idle,
+    );
+    let lines: Vec<_> = app
+        .lines()
+        .iter()
+        .map(|line| (line.text(), line.image))
+        .collect();
+    let text = |s: &str| (s.to_string(), None);
+    let image = |source: usize, row: usize| (String::new(), Some((source, row)));
+    assert_eq!(
+        lines,
+        [
+            text("a"),
+            text(""),
+            image(sources[0], 0),
+            image(sources[0], 1),
+            text("[math]"),
+            text(""),
+            text("b"),
+            text(""),
+            text("$$ y $$"),
+            text("[math: 幅超過]"),
+            text(""),
+            text("c"),
+            text(""),
+            image(sources[2], 0),
+            image(sources[2], 1),
+            text("[math]"),
+            text(""),
+            text("d"),
+        ]
     );
 }
 
@@ -406,12 +463,12 @@ fn image_row_offset_survives_a_width_change_and_generation() {
         "after\n\n".repeat(20)
     ));
     let image = Arc::new(math::render(&request(r"\frac{1}{2}")).unwrap());
-    app.graphics_active = true;
+    app.enable_graphics();
     app.set_math([(0, View::Ready(image.clone()))].into(), Status::Pending);
-    app.top = 1;
+    app.scroll_to(1);
     app.resize(30, 8);
     app.set_math([(0, View::Ready(image))].into(), Status::Pending);
-    assert_eq!(app.lines[app.top].image, Some((0, 1)));
+    assert_eq!(app.lines()[app.top()].image, Some((0, 1)));
 }
 
 #[test]
@@ -419,7 +476,7 @@ fn reference_destinations_have_independent_precise_highlights() {
     let mut app = app("[aaaa][ref] rest [url][ref]\n\n[ref]: https://example.org/aaaa");
     app.resize(120, 8);
     query(&mut app, "aaaa");
-    assert_eq!(app.search.matches.len(), 3);
+    assert_eq!(app.search().matches.len(), 3);
     key(&mut app, KeyCode::Char('n'));
     let mut terminal = Terminal::new(TestBackend::new(120, 8)).unwrap();
     terminal.draw(|frame| app.draw(frame)).unwrap();
@@ -435,7 +492,7 @@ fn reference_destinations_have_independent_precise_highlights() {
             .contains(Modifier::REVERSED)
     );
     query(&mut app, "rest");
-    assert_eq!(app.search.matches.len(), 1);
+    assert_eq!(app.search().matches.len(), 1);
 }
 
 #[test]
@@ -494,12 +551,12 @@ fn math_background_and_cell_padding_are_transparent() {
 #[test]
 fn generation_update_at_tiny_size_does_not_reuse_a_tiny_layout_after_expansion() {
     let mut app = app("$$ x $$\n\n日本語の文章を通常の幅で表示する。");
-    let expected: Vec<_> = app.lines.iter().map(|line| line.text()).collect();
+    let expected: Vec<_> = app.lines().iter().map(|line| line.text()).collect();
     app.resize(10, 2);
     app.set_math(Default::default(), Status::Pending);
     app.resize(40, 8);
     assert_eq!(
-        app.lines
+        app.lines()
             .iter()
             .filter(|line| !line.text().starts_with("[math:"))
             .map(|line| line.text())

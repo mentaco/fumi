@@ -32,6 +32,17 @@ pub(crate) struct LogicalLine {
     language: Option<String>,
 }
 
+impl LogicalLine {
+    /// 字下げ・コード等の属性を持たない論理行。
+    fn new(source: usize, runs: Vec<Run>) -> Self {
+        Self {
+            runs,
+            source,
+            ..Default::default()
+        }
+    }
+}
+
 /// 表示行・論理文字列のバイト範囲と、元のソースのバイト範囲の対応。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Mapping {
@@ -58,6 +69,16 @@ pub struct DisplayLine {
 }
 
 impl DisplayLine {
+    /// 画像・参照先を持たない表示行。
+    pub fn new(line: Line<'static>, source: Range<usize>, mappings: Vec<Mapping>) -> Self {
+        Self {
+            line,
+            source,
+            mappings,
+            image: None,
+            destinations: Vec::new(),
+        }
+    }
     pub fn text(&self) -> String {
         self.line.spans.iter().map(|s| s.content.as_ref()).collect()
     }
@@ -162,10 +183,7 @@ fn is_block(node: &Node) -> bool {
 
 fn blank(lines: &mut Vec<LogicalLine>, source: usize) {
     if lines.last().is_some_and(|l| !l.runs.is_empty() || l.rule) {
-        lines.push(LogicalLine {
-            source,
-            ..Default::default()
-        });
+        lines.push(LogicalLine::new(source, Vec::new()));
     }
 }
 
@@ -187,21 +205,14 @@ fn sequence(nodes: &[Node], gaps: bool, width: usize) -> Vec<LogicalLine> {
             }
             let mut runs = Vec::new();
             inline(&nodes[start..i], Style::default(), &mut runs);
-            lines.push(LogicalLine {
-                runs,
-                source: node.source.start,
-                ..Default::default()
-            });
+            lines.push(LogicalLine::new(node.source.start, runs));
         }
     }
     lines
 }
 
 fn block(node: &Node, width: usize) -> Vec<LogicalLine> {
-    let base = || LogicalLine {
-        source: node.source.start,
-        ..Default::default()
-    };
+    let base = || LogicalLine::new(node.source.start, Vec::new());
     match &node.kind {
         Kind::Rule => vec![LogicalLine {
             rule: true,
@@ -255,10 +266,7 @@ fn block(node: &Node, width: usize) -> Vec<LogicalLine> {
                 let mut contents =
                     sequence(&item.children, loose, width.saturating_sub(marker.width()));
                 if contents.is_empty() {
-                    contents.push(LogicalLine {
-                        source: item.source.start,
-                        ..Default::default()
-                    });
+                    contents.push(LogicalLine::new(item.source.start, Vec::new()));
                 }
                 for (j, line) in contents.iter_mut().enumerate() {
                     line.prefix
@@ -311,11 +319,7 @@ fn block(node: &Node, width: usize) -> Vec<LogicalLine> {
             .map(|cell| {
                 let mut runs = Vec::new();
                 inline(&cell.children, Style::default(), &mut runs);
-                LogicalLine {
-                    runs,
-                    source: cell.source.start,
-                    ..Default::default()
-                }
+                LogicalLine::new(cell.source.start, runs)
             })
             .collect(),
         Kind::Element(Tag::Table(alignments)) => {
@@ -392,21 +396,22 @@ fn grid_table(node: &Node, alignments: &[Alignment], width: usize) -> Option<Vec
     if table_width > width {
         return None;
     }
-    let border = |left: &str, middle: &str, right: &str, source: usize| LogicalLine {
-        runs: vec![run(
-            format!(
-                "{left}{}{right}",
-                widths
-                    .iter()
-                    .map(|w| "─".repeat(w + 2))
-                    .collect::<Vec<_>>()
-                    .join(middle)
-            ),
-            Style::default(),
-            source..source,
-        )],
-        source,
-        ..Default::default()
+    let border = |left: &str, middle: &str, right: &str, source: usize| {
+        LogicalLine::new(
+            source,
+            vec![run(
+                format!(
+                    "{left}{}{right}",
+                    widths
+                        .iter()
+                        .map(|w| "─".repeat(w + 2))
+                        .collect::<Vec<_>>()
+                        .join(middle)
+                ),
+                Style::default(),
+                source..source,
+            )],
+        )
     };
     let mut result = vec![border("┌", "┬", "┐", node.source.start)];
     for (row_index, row) in rows.iter().enumerate() {
@@ -428,11 +433,7 @@ fn grid_table(node: &Node, alignments: &[Alignment], width: usize) -> Option<Vec
                 source..source,
             ));
         }
-        result.push(LogicalLine {
-            runs,
-            source,
-            ..Default::default()
-        });
+        result.push(LogicalLine::new(source, runs));
         if row_index == 0 {
             result.push(border(
                 "├",
@@ -445,8 +446,9 @@ fn grid_table(node: &Node, alignments: &[Alignment], width: usize) -> Option<Vec
     if rows.len() == 1 {
         let remaining = table_width - 2 - no_row.width();
         let left = remaining / 2;
-        result.push(LogicalLine {
-            runs: vec![run(
+        result.push(LogicalLine::new(
+            node.source.start,
+            vec![run(
                 format!(
                     "│{}{no_row}{}│",
                     " ".repeat(left),
@@ -455,9 +457,7 @@ fn grid_table(node: &Node, alignments: &[Alignment], width: usize) -> Option<Vec
                 Style::default(),
                 node.source.start..node.source.start,
             )],
-            source: node.source.start,
-            ..Default::default()
-        });
+        ));
     }
     result.push(border(
         "└",
@@ -483,30 +483,24 @@ fn table(node: &Node) -> Vec<LogicalLine> {
     let mut result = Vec::new();
     if rows.is_empty() {
         for runs in headers {
-            result.push(LogicalLine {
-                runs,
-                source: node.source.start,
-                ..Default::default()
-            });
+            result.push(LogicalLine::new(node.source.start, runs));
         }
-        result.push(LogicalLine {
-            runs: vec![run("(no row)", Style::default(), node.source.clone())],
-            source: node.source.start,
-            ..Default::default()
-        });
+        result.push(LogicalLine::new(
+            node.source.start,
+            vec![run("(no row)", Style::default(), node.source.clone())],
+        ));
         return result;
     }
     for (idx, row) in rows.into_iter().enumerate() {
         blank(&mut result, row.source.start);
-        result.push(LogicalLine {
-            runs: vec![run(
+        result.push(LogicalLine::new(
+            row.source.start,
+            vec![run(
                 format!("[row {}]", idx + 1),
                 Style::default(),
                 row.source.start..row.source.start,
             )],
-            source: row.source.start,
-            ..Default::default()
-        });
+        ));
         for (col, header) in headers.iter().enumerate() {
             let cell = row.children.get(col);
             let range = cell.map_or(row.source.clone(), |c| c.source.clone());
@@ -523,11 +517,7 @@ fn table(node: &Node) -> Vec<LogicalLine> {
             if runs[before..].iter().all(|r| r.text.is_empty()) {
                 runs.push(run("(empty)", Style::default(), range.clone()));
             }
-            result.push(LogicalLine {
-                runs,
-                source: range.start,
-                ..Default::default()
-            });
+            result.push(LogicalLine::new(range.start, runs));
         }
     }
     result
@@ -657,10 +647,10 @@ pub fn layout(document: &Document, width: usize, colors: bool) -> Vec<DisplayLin
     }
     let mut logical = sequence(&document.nodes, true, width);
     if logical.is_empty() {
-        logical.push(LogicalLine {
-            runs: vec![run("(empty)", Style::default(), 0..0)],
-            ..Default::default()
-        });
+        logical.push(LogicalLine::new(
+            0,
+            vec![run("(empty)", Style::default(), 0..0)],
+        ));
     }
     let mut result = Vec::new();
     for line in logical {
@@ -690,13 +680,11 @@ fn outer_prefix(prefix: &str, width: usize) -> &str {
 
 fn rule_line(line: &LogicalLine, width: usize) -> DisplayLine {
     let prefix = outer_prefix(&line.prefix, width);
-    DisplayLine {
-        line: Line::raw(format!("{prefix}{}", "─".repeat(width - prefix.width()))),
-        source: line.source..line.source,
-        mappings: Vec::new(),
-        image: None,
-        destinations: Vec::new(),
-    }
+    DisplayLine::new(
+        Line::raw(format!("{prefix}{}", "─".repeat(width - prefix.width()))),
+        line.source..line.source,
+        Vec::new(),
+    )
 }
 
 /// ソース対応を作ってから装飾だけを重ねる。引用・字下げでコードの元位置が飛んでも対応を壊さない。
@@ -835,11 +823,8 @@ fn display_line(prefix: String, cells: &[Cell], source: Range<usize>) -> Display
         }
     }
     DisplayLine {
-        line: Line::from(spans),
-        source,
-        mappings,
-        image: None,
         destinations,
+        ..DisplayLine::new(Line::from(spans), source, mappings)
     }
 }
 
@@ -853,14 +838,13 @@ pub fn search_segments(document: &Document) -> Vec<Segment> {
             .filter(|r| !r.source.is_empty())
             .map(|r| r.text.as_str())
             .collect();
-        let filtered = LogicalLine {
-            runs: line
-                .runs
+        let filtered = LogicalLine::new(
+            0,
+            line.runs
                 .into_iter()
                 .filter(|r| !r.source.is_empty())
                 .collect(),
-            ..Default::default()
-        };
+        );
         let mut segment = Segment::default();
         for cell in cells(&filtered, document, false, &rendered) {
             if cell.text == "\n" {

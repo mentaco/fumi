@@ -23,6 +23,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// 描画の最短間隔と、一回の入力待ちの上限。
+const FRAME: Duration = Duration::from_millis(16);
+
 static RAW: AtomicBool = AtomicBool::new(false);
 static ALT: AtomicBool = AtomicBool::new(false);
 static MOUSE: AtomicBool = AtomicBool::new(false);
@@ -157,7 +160,7 @@ pub fn run(mut app: App, signals: &Signals, options: GraphicsOptions) -> io::Res
         }
         let mut suspend = signals.suspend.swap(false, Ordering::Relaxed);
         let current_size = terminal::size()?;
-        if current_size != (app.width, app.height) {
+        if current_size != app.size() {
             app.resize(current_size.0, current_size.1);
             if math.is_some() {
                 kitty.reset();
@@ -168,11 +171,12 @@ pub fn run(mut app: App, signals: &Signals, options: GraphicsOptions) -> io::Res
             }
             dirty = true;
         }
-        if let Some(manager) = &mut math {
-            let views = manager.update(&app.view_state());
+        if let Some(manager) = &mut math
+            && let Some(views) = manager.update(&app.view_state())
+        {
             dirty |= app.set_math(views, Status::Pending);
         }
-        if dirty && last_draw.elapsed() >= Duration::from_millis(16) {
+        if dirty && last_draw.elapsed() >= FRAME {
             kitty.clear_placements(terminal.backend_mut())?;
             let prepared = kitty.prepare(&app.view_state(), terminal.backend_mut());
             if prepared.is_ok() {
@@ -192,7 +196,7 @@ pub fn run(mut app: App, signals: &Signals, options: GraphicsOptions) -> io::Res
             last_draw = Instant::now();
             dirty = false;
         }
-        crate::input::read(&mut decoder, Duration::from_millis(16))?;
+        crate::input::read(&mut decoder, FRAME)?;
         while let Some(event) = decoder.events.pop_front() {
             match event {
                 InputEvent::User(Event::Key(key)) => {
@@ -239,12 +243,9 @@ pub fn run(mut app: App, signals: &Signals, options: GraphicsOptions) -> io::Res
 
 /// 転送失敗後はこの起動中に画像を再試行せず、テキスト表示へ戻す。
 fn disable_graphics(app: &mut App, kitty: &mut Kitty, math: &mut Option<Manager>) {
-    const REASON: &str = "画像転送失敗";
     kitty.reset();
     *math = None;
-    app.graphics_active = false;
-    app.warning = REASON.into();
-    app.set_math(Default::default(), Status::Unavailable(REASON.into()));
+    app.disable_graphics("画像転送失敗".into(), true);
 }
 
 fn configure_graphics(
@@ -253,9 +254,8 @@ fn configure_graphics(
     decoder: &mut Decoder,
     previous: Option<Capabilities>,
 ) -> io::Result<Option<Manager>> {
-    if !app.document.has_display_math() {
-        app.graphics_active = false;
-        app.warning.clear();
+    // 文書は起動中に変わらないため、画像化する数式がなければ画像表示の状態も変わらない。
+    if !app.document().has_display_math() {
         return Ok(None);
     }
     match crate::graphics::query(
@@ -266,19 +266,13 @@ fn configure_graphics(
         previous,
     )? {
         Ok(capabilities) => {
-            app.graphics_active = true;
-            app.warning.clear();
-            app.set_math(Default::default(), Status::Pending);
-            Ok(Some(Manager::new(&app.document, capabilities)))
+            app.enable_graphics();
+            Ok(Some(Manager::new(app.document(), capabilities)))
         }
         Err(reason) => {
-            app.graphics_active = false;
-            app.warning = if options.plain || options.mode == GraphicsMode::Off {
-                String::new()
-            } else {
-                reason.clone()
-            };
-            app.set_math(Default::default(), Status::Unavailable(reason));
+            // 利用者が画像を無効にした場合は、理由を数式に付けるだけで警告は出さない。
+            let requested = options.plain || options.mode == GraphicsMode::Off;
+            app.disable_graphics(reason, !requested);
             Ok(None)
         }
     }

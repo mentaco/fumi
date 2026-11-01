@@ -22,6 +22,8 @@ use std::{
 mod diacritics;
 pub const PLACEHOLDER_COLUMNS: usize = diacritics::DIACRITICS.len();
 const QUERY_ID: u32 = 4_000_000_001;
+/// 端末の画像対応の確認で応答を待つ上限。tmuxの自動設定もこの時間に含める。
+const QUERY_TIMEOUT: Duration = Duration::from_millis(150);
 static OWNED: Mutex<Vec<(u32, Transport)>> = Mutex::new(Vec::new());
 static NEXT_ID: OnceLock<AtomicU32> = OnceLock::new();
 
@@ -139,10 +141,10 @@ pub fn query(
     let mut supported =
         transport == Transport::Tmux && previous.is_some_and(|c| c.transport == Transport::Tmux);
     if transport == Transport::Tmux && !supported {
-        if let Err(reason) = enable_tmux_passthrough(start + Duration::from_millis(150)) {
+        if let Err(reason) = enable_tmux_passthrough(start + QUERY_TIMEOUT) {
             return Ok(Err(reason.into()));
         }
-        if start.elapsed() >= Duration::from_millis(150) {
+        if start.elapsed() >= QUERY_TIMEOUT {
             return Ok(Err("tmux自動設定タイムアウト".into()));
         }
     }
@@ -176,10 +178,11 @@ pub fn query(
     let mut cell = None;
     let mut pixels = None;
     let mut users = VecDeque::new();
-    while start.elapsed() < Duration::from_millis(150) {
+    while start.elapsed() < QUERY_TIMEOUT {
         input::read(
             decoder,
-            (Duration::from_millis(150) - start.elapsed().min(Duration::from_millis(150)))
+            QUERY_TIMEOUT
+                .saturating_sub(start.elapsed())
                 .min(Duration::from_millis(8)),
         )?;
         while let Some(event) = decoder.events.pop_front() {
@@ -559,6 +562,7 @@ mod tests {
         app::App,
         document::{Document, Kind},
     };
+    use crossterm::event::{KeyCode, KeyEvent};
     use ratatui::{Terminal, backend::TestBackend};
 
     #[test]
@@ -578,9 +582,9 @@ mod tests {
             true,
         );
         app.resize(40, 5);
-        app.graphics_active = true;
+        app.enable_graphics();
         let source = app
-            .document
+            .document()
             .nodes
             .iter()
             .find(|n| matches!(n.kind, Kind::Math { .. }))
@@ -599,7 +603,7 @@ mod tests {
             Default::default(),
         );
         let start = app
-            .lines
+            .lines()
             .iter()
             .position(|line| line.image == Some((source, 0)))
             .unwrap();
@@ -617,7 +621,7 @@ mod tests {
                 .buffer
                 .clone()
         };
-        app.top = start + 2;
+        app.scroll_to(start + 2);
         let buffer = draw(&mut terminal, &app);
         assert_eq!(
             buffer[(1, 0)].symbol(),
@@ -630,14 +634,14 @@ mod tests {
         assert_eq!(buffer[(1, 0)].fg, Color::Rgb(3, 4, 5));
         assert!(!buffer[(1, 2)].symbol().starts_with('\u{10eeee}'));
         assert!(!buffer[(1, 4)].symbol().starts_with('\u{10eeee}'));
-        app.top = start - 2;
+        app.scroll_to(start - 2);
         let buffer = draw(&mut terminal, &app);
         assert_eq!(
             buffer[(1, 2)].symbol(),
             "\u{10eeee}\u{0305}\u{0305}\u{030e}"
         );
         assert!(!buffer[(1, 4)].symbol().starts_with('\u{10eeee}'));
-        app.help = true;
+        app.key(KeyEvent::from(KeyCode::Char('?')));
         let buffer = draw(&mut terminal, &app);
         assert!(
             !buffer
@@ -645,7 +649,7 @@ mod tests {
                 .iter()
                 .any(|c| c.symbol().starts_with('\u{10eeee}'))
         );
-        app.help = false;
+        app.key(KeyEvent::from(KeyCode::Char('?')));
         draw(&mut terminal, &app);
         assert!(
             terminal.backend().buffer()[(1, 2)]

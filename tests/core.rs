@@ -191,39 +191,39 @@ fn scrolling_help_and_pending_g() {
     let mut app = long_app();
     assert_eq!(app.percentage(), 0);
     key(&mut app, KeyCode::Char('j'));
-    assert_eq!(app.top, 1);
+    assert_eq!(app.top(), 1);
     ctrl(&mut app, 'd');
-    assert_eq!(app.top, 5);
+    assert_eq!(app.top(), 5);
     ctrl(&mut app, 'f');
-    assert_eq!(app.top, 13);
+    assert_eq!(app.top(), 13);
     ctrl(&mut app, 'u');
-    assert_eq!(app.top, 9);
+    assert_eq!(app.top(), 9);
     ctrl(&mut app, 'b');
-    assert_eq!(app.top, 1);
+    assert_eq!(app.top(), 1);
     key(&mut app, KeyCode::Char('G'));
-    assert_eq!(app.top, app.max_top());
+    assert_eq!(app.top(), app.max_top());
     assert_eq!(app.percentage(), 100);
     key(&mut app, KeyCode::Char('j'));
-    assert_eq!(app.top, app.max_top());
+    assert_eq!(app.top(), app.max_top());
     key(&mut app, KeyCode::Char('g'));
-    assert!(app.pending_g);
+    assert!(app.pending_g());
     assert!(app.status().contains("g待ち"));
     assert_eq!(key(&mut app, KeyCode::Esc), Action::None);
-    assert!(!app.pending_g);
+    assert!(!app.pending_g());
     key(&mut app, KeyCode::Char('g'));
     key(&mut app, KeyCode::Char('g'));
-    assert_eq!(app.top, 0);
+    assert_eq!(app.top(), 0);
     key(&mut app, KeyCode::Char('g'));
     key(&mut app, KeyCode::Char('j'));
-    assert_eq!(app.top, 1);
+    assert_eq!(app.top(), 1);
     key(&mut app, KeyCode::Char('?'));
-    assert!(app.help);
+    assert!(app.help_visible());
     key(&mut app, KeyCode::Char('G'));
-    assert_eq!(app.top, 1);
+    assert_eq!(app.top(), 1);
     key(&mut app, KeyCode::Char('g'));
     key(&mut app, KeyCode::Char('g'));
     assert_eq!(key(&mut app, KeyCode::Esc), Action::None);
-    assert!(!app.help);
+    assert!(!app.help_visible());
     assert_eq!(key(&mut app, KeyCode::Char('q')), Action::Exit(0));
     assert_eq!(ctrl(&mut app, 'c'), Action::Exit(130));
     assert_eq!(ctrl(&mut app, 'z'), Action::Suspend);
@@ -237,7 +237,7 @@ fn q_exits_from_help_including_pending_g() {
         if pending_g {
             key(&mut app, KeyCode::Char('g'));
         }
-        assert!(app.help);
+        assert!(app.help_visible());
         assert_eq!(key(&mut app, KeyCode::Char('q')), Action::Exit(0));
     }
 }
@@ -258,7 +258,7 @@ fn help_percentage_handles_fitting_and_scrollable_content() {
 
     key(&mut app, KeyCode::Esc);
     assert!(app.status().contains(" TEXT 100%"));
-    assert!(!app.help);
+    assert!(!app.help_visible());
 }
 
 #[test]
@@ -268,18 +268,18 @@ fn resize_keeps_source_and_small_mode_preserves_position() {
     for _ in 0..10 {
         key(&mut app, KeyCode::Char('j'));
     }
-    let anchor = app.lines[app.top].source.start;
+    let anchor = app.lines()[app.top()].source.start;
     app.resize(40, 12);
-    assert!(app.lines[app.top].source.contains(&anchor));
-    let top = app.top;
+    assert!(app.lines()[app.top()].source.contains(&anchor));
+    let top = app.top();
     key(&mut app, KeyCode::Char('?'));
     app.resize(19, 3);
-    assert!(!app.help);
-    assert_eq!(app.top, top);
+    assert!(!app.help_visible());
+    assert_eq!(app.top(), top);
     key(&mut app, KeyCode::Char('j'));
-    assert_eq!(app.top, top);
+    assert_eq!(app.top(), top);
     app.resize(40, 12);
-    assert_eq!(app.top, top);
+    assert_eq!(app.top(), top);
     let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
     terminal.draw(|f| app.draw(f)).unwrap();
     assert!(
@@ -298,13 +298,13 @@ fn height_resize_preserves_position_and_clamps_body_and_help() {
     for _ in 0..12 {
         key(&mut app, KeyCode::Char('j'));
     }
-    let anchor = app.lines[app.top].source.clone();
+    let anchor = app.lines()[app.top()].source.clone();
     app.resize(40, 20);
-    assert_eq!(app.lines[app.top].source, anchor);
+    assert_eq!(app.lines()[app.top()].source, anchor);
 
     key(&mut app, KeyCode::End);
     app.resize(40, 30);
-    assert_eq!(app.top, app.max_top());
+    assert_eq!(app.top(), app.max_top());
     assert_eq!(app.percentage(), 100);
     key(&mut app, KeyCode::Char('?'));
     key(&mut app, KeyCode::End);
@@ -315,22 +315,22 @@ fn height_resize_preserves_position_and_clamps_body_and_help() {
     assert!(app.status().contains("0% HELP"));
 
     key(&mut app, KeyCode::Esc);
-    let anchor = app.lines[app.top].source.clone();
+    let anchor = app.lines()[app.top()].source.clone();
     app.resize(19, 3);
     app.resize(40, 10);
-    assert_eq!(app.lines[app.top].source, anchor);
+    assert_eq!(app.lines()[app.top()].source, anchor);
     // 最小サイズから別の本文幅へ復帰する場合は折り返しを更新する。
     app.resize(19, 3);
     app.resize(80, 10);
-    assert!(app.lines.iter().all(|line| line.text().width() <= 78));
-    assert!(app.lines[app.top].source.contains(&anchor.start));
+    assert!(app.lines().iter().all(|line| line.text().width() <= 78));
+    assert!(app.lines()[app.top()].source.contains(&anchor.start));
 }
 
 #[test]
 fn empty_document_status_and_color_priority() {
     let mut app = App::new(Document::parse(String::new()), "empty.md", false);
     app.resize(80, 24);
-    assert_eq!(app.lines[0].text(), "(empty)");
+    assert_eq!(app.lines()[0].text(), "(empty)");
     assert_eq!(app.percentage(), 100);
     assert!(!ColorMode::Auto.enabled(Some(OsStr::new("1")), "xterm"));
     assert!(ColorMode::Auto.enabled(Some(OsStr::new("")), "xterm"));
@@ -384,10 +384,10 @@ fn resize_with_inline_code_and_link_preserves_content() {
         for _ in 0..8 {
             key(&mut app, KeyCode::Char('j'));
         }
-        let anchor = app.lines[app.top].source.start;
+        let anchor = app.lines()[app.top()].source.start;
         assert!(anchor > 20);
         app.resize(40, 10);
-        assert!(app.lines[app.top].source.contains(&anchor));
+        assert!(app.lines()[app.top()].source.contains(&anchor));
     }
 }
 

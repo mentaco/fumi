@@ -6,9 +6,10 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::HashMap,
     io::{self, Read, Write},
     ops::Range,
+    os::fd::AsRawFd,
     process::{Child, Command, Stdio},
     sync::Arc,
     time::{Duration, Instant},
@@ -17,6 +18,12 @@ use std::{
 pub const MAX_TEX: usize = 16 * 1024;
 pub const CACHE_LIMIT: usize = 128 * 1024 * 1024;
 const OUTPUT_LIMIT: usize = 8 * 1024 * 1024;
+/// キャッシュに保持する結果の件数上限。容量は `CACHE_LIMIT` でも制限する。
+const CACHE_ENTRIES: usize = 4096;
+/// 同時に実行するワーカーの上限。
+const MAX_JOBS: usize = 2;
+/// ワーカー1件の実行時間の上限。超えたらkillして回収する。
+const JOB_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Request {
@@ -237,78 +244,218 @@ struct Job {
     bytes: Vec<u8>,
     start: Instant,
 }
+impl Job {
+    /// 出力を読み進める。終了・失敗・期限切れなら、その結果を返す。
+    fn poll(&mut self) -> Option<View> {
+        let mut failed = false;
+        if let Some(output) = &mut self.child.stdout {
+            let mut chunk = [0; 16384];
+            loop {
+                match output.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(count) => {
+                        self.bytes.extend_from_slice(&chunk[..count]);
+                        if self.bytes.len() > OUTPUT_LIMIT {
+                            failed = true;
+                            break;
+                        }
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                    Err(_) => {
+                        failed = true;
+                        break;
+                    }
+                }
+            }
+        }
+        let status = self.child.try_wait();
+        let expired = self.start.elapsed() >= JOB_TIMEOUT;
+        if !failed && !expired && matches!(status, Ok(None)) {
+            return None;
+        }
+        if matches!(status, Ok(Some(_)))
+            && let Some(output) = &mut self.child.stdout
+        {
+            let _ = output
+                .take(OUTPUT_LIMIT.saturating_sub(self.bytes.len()) as u64)
+                .read_to_end(&mut self.bytes);
+        }
+        Some(if expired {
+            View::Failed(format!("{}秒タイムアウト", JOB_TIMEOUT.as_secs()))
+        } else if matches!(status, Ok(Some(s)) if s.success())
+            && let Some((width, height)) = png_dimensions(&self.bytes)
+        {
+            View::Ready(Arc::new(Image {
+                columns: width as usize / usize::from(self.key.cell.0),
+                rows: height as usize / usize::from(self.key.cell.1),
+                width,
+                height,
+                png: std::mem::take(&mut self.bytes),
+            }))
+        } else {
+            View::Failed("構文・未対応コマンド・生成失敗".into())
+        })
+    }
+}
 impl Drop for Job {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
 }
-struct Cache {
-    key: Request,
-    view: View,
-}
-pub struct Manager {
-    formulas: Vec<(Range<usize>, String)>,
+
+/// 実行中のワーカー。同時実行数を `MAX_JOBS` までに抑える。
+#[derive(Default)]
+struct Workers {
     jobs: Vec<Job>,
-    cache: VecDeque<Cache>,
+}
+impl Workers {
+    /// 終わったジョブを回収し、その要求と結果を返す。
+    fn collect(&mut self) -> Vec<(Request, View)> {
+        let mut done = Vec::new();
+        for i in (0..self.jobs.len()).rev() {
+            if let Some(view) = self.jobs[i].poll() {
+                let job = self.jobs.remove(i);
+                done.push((job.key.clone(), view));
+            }
+        }
+        done
+    }
+    fn is_running(&self, key: &Request) -> bool {
+        self.jobs.iter().any(|job| &job.key == key)
+    }
+    fn is_full(&self) -> bool {
+        self.jobs.len() >= MAX_JOBS
+    }
+    fn start(&mut self, key: Request) -> io::Result<()> {
+        self.jobs.push(start_job(key)?);
+        Ok(())
+    }
+}
+
+struct Entry {
+    view: View,
+    used: u64,
+}
+
+/// 生成結果のLRUキャッシュ。件数と、PNGとデコード相当量の合計で古いものから捨てる。
+#[derive(Default)]
+struct Cache {
+    entries: HashMap<Request, Entry>,
+    clock: u64,
+    cost: usize,
+}
+impl Cache {
+    fn cost(view: &View) -> usize {
+        match view {
+            View::Ready(image) => image.cost(),
+            View::Failed(_) => 0,
+        }
+    }
+    fn get(&self, key: &Request) -> Option<&View> {
+        self.entries.get(key).map(|entry| &entry.view)
+    }
+    /// 結果があれば最近使ったものとして扱う。
+    fn touch(&mut self, key: &Request) -> bool {
+        let Some(entry) = self.entries.get_mut(key) else {
+            return false;
+        };
+        self.clock += 1;
+        entry.used = self.clock;
+        true
+    }
+    fn insert(&mut self, key: Request, view: View) {
+        self.clock += 1;
+        self.cost += Self::cost(&view);
+        let entry = Entry {
+            view,
+            used: self.clock,
+        };
+        if let Some(previous) = self.entries.insert(key, entry) {
+            self.cost -= Self::cost(&previous.view);
+        }
+        while self.entries.len() > CACHE_ENTRIES || self.cost > CACHE_LIMIT {
+            let Some(oldest) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.used)
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            if let Some(entry) = self.entries.remove(&oldest) {
+                self.cost -= Self::cost(&entry.view);
+            }
+        }
+    }
+}
+
+pub struct Manager {
+    /// ブロック数式のソース範囲と、現在の本文幅での生成要求。
+    formulas: Vec<(Range<usize>, Request)>,
+    width: Option<usize>,
+    workers: Workers,
+    cache: Cache,
+    /// 前回返した結果から変わり得るか。
+    changed: bool,
     pub capabilities: Capabilities,
 }
 impl Manager {
     pub fn new(document: &Document, capabilities: Capabilities) -> Self {
-        let formulas = document
-            .display_math()
-            .map(|(node, tex)| (node.source.clone(), tex.to_string()))
-            .collect();
-        Self {
-            formulas,
-            jobs: Vec::new(),
-            cache: VecDeque::new(),
+        let mut manager = Self {
+            formulas: Vec::new(),
+            width: None,
+            workers: Workers::default(),
+            cache: Cache::default(),
+            changed: true,
             capabilities,
+        };
+        manager.formulas = document
+            .display_math()
+            .map(|(node, tex)| (node.source.clone(), manager.key(tex, 0)))
+            .collect();
+        manager
+    }
+    fn request_width(&self, width: usize) -> usize {
+        if self.capabilities.transport == Transport::Tmux {
+            width.min(PLACEHOLDER_COLUMNS)
+        } else {
+            width
         }
     }
     fn key(&self, tex: &str, width: usize) -> Request {
         Request {
             tex: tex.into(),
-            width: if self.capabilities.transport == Transport::Tmux {
-                width.min(PLACEHOLDER_COLUMNS)
-            } else {
-                width
-            },
+            width: self.request_width(width),
             cell: self.capabilities.cell,
             foreground: self.capabilities.foreground,
             monochrome: self.capabilities.monochrome,
         }
     }
-    fn insert(&mut self, key: Request, view: View) {
-        self.cache.retain(|entry| entry.key != key);
-        self.cache.push_back(Cache { key, view });
-        while self.cache.len() > 4096
-            || self
-                .cache
-                .iter()
-                .map(|e| match &e.view {
-                    View::Ready(image) => image.cost(),
-                    View::Failed(_) => 0,
-                })
-                .sum::<usize>()
-                > CACHE_LIMIT
-        {
-            self.cache.pop_front();
+    /// 本文幅が変わったら、各数式の要求を新しい幅へ合わせる。
+    fn set_width(&mut self, width: usize) {
+        if self.width == Some(width) {
+            return;
         }
+        self.width = Some(width);
+        let width = self.request_width(width);
+        for (_, key) in &mut self.formulas {
+            key.width = width;
+        }
+        self.changed = true;
     }
-    pub fn update(&mut self, view: &ViewState) -> HashMap<usize, View> {
-        let width = view.width;
-        let v = view.rows;
-        let top = view.top;
-        let lines = view.lines;
-        let range = top.saturating_sub(v)..(top + v * 2).min(lines.len());
-        let wanted: Vec<_> = if !view.body_visible {
-            Vec::new()
-        } else {
-            let mut formulas: Vec<_> = self
-                .formulas
+    /// 画面と前後1画面にある数式の番号。画面内を上から、続いて画面に近い順に並べる。
+    fn wanted(&self, view: &ViewState) -> Vec<usize> {
+        if !view.body_visible {
+            return Vec::new();
+        }
+        let (top, rows, lines) = (view.top, view.rows, view.lines);
+        let range = top.saturating_sub(rows)..(top + rows * 2).min(lines.len());
+        let mut formulas: Vec<_> =
+            self.formulas
                 .iter()
-                .filter_map(|(source, tex)| {
+                .enumerate()
+                .filter_map(|(index, (source, _))| {
                     if !lines[range.clone()].iter().any(|line| {
                         line.source.start < source.end && source.start <= line.source.end
                     }) {
@@ -317,8 +464,8 @@ impl Manager {
                     let row = anchored_row(lines, source.start);
                     range.contains(&row).then(|| {
                         (
-                            tex.clone(),
-                            if row >= top && row < top + v {
+                            index,
+                            if row >= top && row < top + rows {
                                 (0, row - top)
                             } else {
                                 (1, row.abs_diff(top))
@@ -327,98 +474,59 @@ impl Manager {
                     })
                 })
                 .collect();
-            formulas.sort_by_key(|(_, distance)| *distance);
-            formulas
-        };
+        formulas.sort_by_key(|(_, distance)| *distance);
+        formulas.into_iter().map(|(index, _)| index).collect()
+    }
+    /// 表示状態に合わせてジョブを進める。結果が変わり得るときだけ、数式ごとの結果を返す。
+    pub fn update(&mut self, view: &ViewState) -> Option<HashMap<usize, View>> {
+        self.set_width(view.width);
         // 実行中ジョブは位置に関わらず最大2秒で終える。古い幅の結果はキャッシュだけへ。
-        for i in (0..self.jobs.len()).rev() {
-            let job = &mut self.jobs[i];
-            let mut failed = false;
-            if let Some(output) = &mut job.child.stdout {
-                let mut chunk = [0; 16384];
-                loop {
-                    match output.read(&mut chunk) {
-                        Ok(0) => break,
-                        Ok(count) => {
-                            job.bytes.extend_from_slice(&chunk[..count]);
-                            if job.bytes.len() > OUTPUT_LIMIT {
-                                failed = true;
-                                break;
-                            }
-                        }
-                        Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
-                        Err(_) => {
-                            failed = true;
-                            break;
-                        }
-                    }
-                }
-            }
-            let status = job.child.try_wait();
-            let expired = job.start.elapsed() >= Duration::from_secs(2);
-            if failed || expired || !matches!(status, Ok(None)) {
-                let mut job = self.jobs.remove(i);
-                if matches!(status, Ok(Some(_)))
-                    && let Some(output) = &mut job.child.stdout
-                {
-                    let _ = output
-                        .take(OUTPUT_LIMIT.saturating_sub(job.bytes.len()) as u64)
-                        .read_to_end(&mut job.bytes);
-                }
-                let view = if expired {
-                    View::Failed("2秒タイムアウト".into())
-                } else if matches!(status, Ok(Some(s)) if s.success())
-                    && let Some((width, height)) = png_dimensions(&job.bytes)
-                {
-                    View::Ready(Arc::new(Image {
-                        columns: width as usize / usize::from(job.key.cell.0),
-                        rows: height as usize / usize::from(job.key.cell.1),
-                        width,
-                        height,
-                        png: std::mem::take(&mut job.bytes),
-                    }))
-                } else {
-                    View::Failed("構文・未対応コマンド・生成失敗".into())
-                };
-                self.insert(job.key.clone(), view);
-            }
+        for (key, view) in self.workers.collect() {
+            self.cache.insert(key, view);
+            self.changed = true;
         }
-        for (tex, _) in wanted {
-            let key = self.key(&tex, width);
-            if let Some(index) = self.cache.iter().position(|e| e.key == key) {
-                let entry = self.cache.remove(index).unwrap();
-                self.cache.push_back(entry);
+        for index in self.wanted(view) {
+            let key = &self.formulas[index].1;
+            if self.cache.touch(key) || self.workers.is_running(key) || self.workers.is_full() {
                 continue;
             }
-            if self.jobs.iter().any(|j| j.key == key) || self.jobs.len() >= 2 {
-                continue;
-            }
-            if tex.len() > MAX_TEX {
-                self.insert(key, View::Failed("16 KiB上限".into()));
-                continue;
-            }
-            match start_job(key.clone()) {
-                Ok(job) => self.jobs.push(job),
-                Err(_) => self.insert(key, View::Failed("レンダラー起動失敗".into())),
-            }
+            let key = key.clone();
+            let view = if key.tex.len() > MAX_TEX {
+                View::Failed("16 KiB上限".into())
+            } else {
+                match self.workers.start(key.clone()) {
+                    Ok(()) => continue,
+                    Err(_) => View::Failed("レンダラー起動失敗".into()),
+                }
+            };
+            self.cache.insert(key, view);
+            self.changed = true;
         }
-        self.formulas
-            .iter()
-            .filter_map(|(source, tex)| {
-                let key = self.key(tex, width);
-                self.cache
-                    .iter()
-                    .find(|entry| entry.key == key)
-                    .map(|entry| (source.start, entry.view.clone()))
-            })
-            .collect()
+        if !std::mem::take(&mut self.changed) {
+            return None;
+        }
+        Some(
+            self.formulas
+                .iter()
+                .filter_map(|(source, key)| {
+                    self.cache.get(key).map(|view| (source.start, view.clone()))
+                })
+                .collect(),
+        )
     }
     pub fn active_jobs(&self) -> usize {
-        self.jobs.len()
+        self.workers.jobs.len()
     }
 }
+/// ワーカーの出力を読むときに描画ループを止めないよう、パイプを非ブロッキングにする。
+fn set_nonblocking(pipe: &impl AsRawFd) -> io::Result<()> {
+    if unsafe { libc::fcntl(pipe.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 fn start_job(key: Request) -> io::Result<Job> {
-    use std::os::fd::AsRawFd;
     let mut child = Command::new(std::env::current_exe()?)
         .env("FUMI_INTERNAL_MATH_WORKER", "1")
         .stdin(Stdio::piped())
@@ -431,11 +539,10 @@ fn start_job(key: Request) -> io::Result<Job> {
     std::thread::spawn(move || {
         let _ = input.write_all(&bytes);
     });
-    let fd = child.stdout.as_ref().unwrap().as_raw_fd();
-    if unsafe { libc::fcntl(fd, libc::F_SETFL, libc::O_NONBLOCK) } < 0 {
+    if let Err(error) = set_nonblocking(child.stdout.as_ref().unwrap()) {
         let _ = child.kill();
         let _ = child.wait();
-        return Err(io::Error::last_os_error());
+        return Err(error);
     }
     Ok(Job {
         key,
@@ -463,7 +570,7 @@ mod tests {
         let mut manager = Manager::new(&document, capabilities());
         for i in 0..3 {
             let key = manager.key(&format!("x_{i}"), 78);
-            manager.insert(
+            manager.cache.insert(
                 key,
                 View::Ready(Arc::new(Image {
                     png: vec![0],
@@ -474,25 +581,43 @@ mod tests {
                 })),
             );
         }
-        assert_eq!(manager.cache.len(), 1);
-        assert_eq!(manager.cache.front().unwrap().key.tex, "x_2");
-        assert!(
-            manager
-                .cache
-                .iter()
-                .map(|entry| match &entry.view {
-                    View::Ready(image) => image.cost(),
-                    _ => 0,
-                })
-                .sum::<usize>()
-                <= CACHE_LIMIT
-        );
+        assert_eq!(manager.cache.entries.len(), 1);
+        assert_eq!(manager.cache.entries.keys().next().unwrap().tex, "x_2");
+        let total: usize = manager
+            .cache
+            .entries
+            .values()
+            .map(|entry| Cache::cost(&entry.view))
+            .sum();
+        assert_eq!(manager.cache.cost, total);
+        assert!(total <= CACHE_LIMIT);
+    }
+    #[test]
+    fn update_returns_results_only_when_they_may_have_changed() {
+        let mut app = App::new(Document::parse("$$ x $$".into()), "update.md", false);
+        app.resize(80, 24);
+        let mut manager = Manager::new(app.document(), capabilities());
+        // ワーカーを起動しないよう、使う幅の結果を先に入れておく。
+        for (width, reason) in [(78, "wide"), (58, "narrow")] {
+            let key = manager.key("x", width);
+            manager.cache.insert(key, View::Failed(reason.into()));
+        }
+        let failed = |views: Option<HashMap<usize, View>>| match views.unwrap().get(&0) {
+            Some(View::Failed(reason)) => reason.clone(),
+            _ => panic!("結果がない"),
+        };
+        assert_eq!(failed(manager.update(&app.view_state())), "wide");
+        assert!(manager.update(&app.view_state()).is_none());
+        app.resize(60, 24);
+        assert_eq!(failed(manager.update(&app.view_state())), "narrow");
+        assert!(manager.update(&app.view_state()).is_none());
+        assert_eq!(manager.active_jobs(), 0);
     }
     #[test]
     fn timeout_kills_and_reaps_worker_without_waiting_for_completion() {
         let mut app = App::new(Document::parse("$$ x $$".into()), "timeout.md", false);
         app.resize(80, 24);
-        let mut manager = Manager::new(&app.document, capabilities());
+        let mut manager = Manager::new(app.document(), capabilities());
         let key = manager.key("x", 78);
         let child = Command::new("/bin/sleep")
             .arg("10")
@@ -500,20 +625,16 @@ mod tests {
             .spawn()
             .unwrap();
         let pid = child.id();
-        manager.jobs.push(Job {
+        manager.workers.jobs.push(Job {
             key,
             child,
             bytes: Vec::new(),
             start: Instant::now() - Duration::from_secs(3),
         });
-        // pollと同じ非ブロッキングstdoutを使用する。
-        use std::os::fd::AsRawFd;
-        let fd = manager.jobs[0].child.stdout.as_ref().unwrap().as_raw_fd();
-        unsafe {
-            libc::fcntl(fd, libc::F_SETFL, libc::O_NONBLOCK);
-        }
+        // 実際のジョブと同じ非ブロッキングstdoutを使用する。
+        set_nonblocking(manager.workers.jobs[0].child.stdout.as_ref().unwrap()).unwrap();
         let start = Instant::now();
-        let views = manager.update(&app.view_state());
+        let views = manager.update(&app.view_state()).unwrap();
         assert!(start.elapsed() < Duration::from_secs(1));
         assert_eq!(manager.active_jobs(), 0);
         assert!(
