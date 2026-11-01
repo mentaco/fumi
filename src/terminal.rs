@@ -15,7 +15,9 @@ use crossterm::{
 use ratatui::{Terminal, backend::CrosstermBackend};
 use signal_hook::{SigId, consts::signal::*, flag};
 use std::{
+    fs::{File, OpenOptions},
     io::{self, Write},
+    os::fd::AsRawFd,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -73,6 +75,28 @@ impl Drop for Signals {
             signal_hook::low_level::unregister(id);
         }
     }
+}
+
+/// 制御端末を開く。`fumi -` では、キー入力と端末応答をこの端末から読む（仕様2.4節）。
+/// 標準入力が閉じていて最小のfdとして0が割り当てられた場合は、文書の入力元がないためエラーにする。
+pub fn open_tty() -> io::Result<File> {
+    let tty = OpenOptions::new().read(true).write(true).open("/dev/tty")?;
+    if tty.as_raw_fd() == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "標準入力が閉じています",
+        ));
+    }
+    Ok(tty)
+}
+
+/// 文書を読み終えた標準入力を端末に置き換える。以降のキー入力・端末応答・raw modeは、
+/// ファイル入力と同じく標準入力（fd 0）の端末を使う。
+pub fn replace_stdin(tty: File) -> io::Result<()> {
+    if unsafe { libc::dup2(tty.as_raw_fd(), 0) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 /// 復旧は各段階を独立に試みる。出力失敗でraw mode解除を飛ばさない。

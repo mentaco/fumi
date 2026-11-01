@@ -3,9 +3,18 @@ use fumi::{
     app::App,
     document::Document,
     math::{self, Request, Status, View},
-    source::decode,
+    source::{MAX_BYTES, decode, read_stream},
 };
-use std::sync::Arc;
+use std::{
+    io::Write,
+    os::fd::AsFd,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread,
+    time::{Duration, Instant},
+};
 fn key(app: &mut App, code: KeyCode) {
     app.key(KeyEvent::new(code, KeyModifiers::NONE));
 }
@@ -37,6 +46,61 @@ fn decoding_is_shared_by_every_input_source() {
     // 先頭以外のBOMは本文として残す。
     assert_eq!(decode("a\u{feff}".into()).unwrap(), "a\u{feff}");
     assert!(decode(b"\xff".to_vec()).is_err());
+}
+
+#[test]
+fn stream_reads_until_eof_across_chunks() {
+    let (reader, mut writer) = std::io::pipe().unwrap();
+    let data: Vec<u8> = (0..200_000).map(|i| (i % 251) as u8).collect();
+    let expected = data.clone();
+    let feeder = thread::spawn(move || {
+        for chunk in data.chunks(7000) {
+            writer.write_all(chunk).unwrap();
+        }
+    });
+    assert_eq!(
+        read_stream(reader.as_fd(), MAX_BYTES, || false).unwrap(),
+        expected
+    );
+    feeder.join().unwrap();
+    let (reader, writer) = std::io::pipe().unwrap();
+    drop(writer);
+    assert!(
+        read_stream(reader.as_fd(), MAX_BYTES, || false)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn stream_stops_on_interrupt_while_the_writer_is_idle() {
+    let (reader, mut writer) = std::io::pipe().unwrap();
+    writer.write_all(b"partial").unwrap();
+    let flag = Arc::new(AtomicBool::new(false));
+    let setter = Arc::clone(&flag);
+    let start = Instant::now();
+    let timer = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(100));
+        setter.store(true, Ordering::Relaxed);
+    });
+    let error =
+        read_stream(reader.as_fd(), MAX_BYTES, || flag.load(Ordering::Relaxed)).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::Interrupted);
+    assert!(start.elapsed() < Duration::from_secs(2));
+    timer.join().unwrap();
+    drop(writer);
+}
+
+#[test]
+fn stream_rejects_input_over_the_limit_without_reading_to_eof() {
+    let (reader, mut writer) = std::io::pipe().unwrap();
+    writer.write_all(b"12345").unwrap();
+    // 書き手を開いたままでも、上限を超えた時点でエラーにする。
+    assert!(read_stream(reader.as_fd(), 4, || false).is_err());
+    let (reader, mut writer) = std::io::pipe().unwrap();
+    writer.write_all(b"1234").unwrap();
+    drop(writer);
+    assert_eq!(read_stream(reader.as_fd(), 4, || false).unwrap(), b"1234");
 }
 
 #[test]

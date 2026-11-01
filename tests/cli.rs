@@ -26,7 +26,7 @@ fn syntax_errors_precede_tty_checks() {
         vec!["--watch", "a"],
         vec!["--graphics", "unknown", "a"],
         vec!["--color", "wrong", "a"],
-        vec!["-"],
+        vec!["-", "a"],
     ] {
         let output = run(&args);
         assert_eq!(output.status.code(), Some(2), "{args:?}");
@@ -43,6 +43,10 @@ fn redirected_output_has_no_terminal_controls() {
         vec!["--graphics", "off", "missing.md"],
         vec!["--color", "always", "missing.md"],
         vec!["--", "-memo.md"],
+        // 標準入力も、構文検証の後にTTYを確認する（仕様2.4節）。
+        vec!["-"],
+        vec!["--plain", "-"],
+        vec!["--", "-"],
     ] {
         let output = run(&args);
         assert_eq!(output.status.code(), Some(1));

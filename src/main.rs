@@ -4,8 +4,8 @@ use fumi::{
     cli::Cli,
     document::Document,
     profile,
-    source::{load, sanitize},
-    terminal::{GraphicsOptions, Signals, run},
+    source::{STDIN_NAME, load, load_stdin, sanitize},
+    terminal::{GraphicsOptions, Signals, open_tty, replace_stdin, run},
 };
 use std::{
     io::{self, IsTerminal, Write},
@@ -46,16 +46,32 @@ fn main() -> ExitCode {
             return ExitCode::from(code);
         }
     };
-    if cli.file.as_os_str() == "-" {
-        return error(
-            "-",
-            "標準入力はv1では未対応です。実ファイルには ./- を指定してください",
-            2,
-        );
-    }
-    if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
-        return error("端末", "stdinとstdoutの両方にTTYが必要です", 1);
-    }
+    // `-` は標準入力。実ファイル名が `-` の場合は `./-` を指定する（仕様2.1・2.4節）。
+    let stdin_input = cli.file.as_os_str() == "-";
+    let tty = if stdin_input {
+        if !io::stdout().is_terminal() {
+            return error("端末", "stdoutにTTYが必要です", 1);
+        }
+        if io::stdin().is_terminal() {
+            return error(
+                "端末",
+                "fumi - には、パイプかリダイレクトで標準入力を渡してください",
+                1,
+            );
+        }
+        match open_tty() {
+            Ok(tty) => Some(tty),
+            Err(e) if e.kind() == io::ErrorKind::InvalidInput => {
+                return error(STDIN_NAME, &e.to_string(), 1);
+            }
+            Err(e) => return error("端末", &format!("/dev/ttyを開けません: {e}"), 1),
+        }
+    } else {
+        if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+            return error("端末", "stdinとstdoutの両方にTTYが必要です", 1);
+        }
+        None
+    };
     let term = std::env::var("TERM").unwrap_or_default();
     if term.is_empty() || term == "dumb" {
         return error("端末", "TERMに有効な端末種別を設定してください", 1);
@@ -65,18 +81,33 @@ fn main() -> ExitCode {
         Err(e) => return error("端末", &e.to_string(), 1),
     };
     profile::mark("setup_ms");
-    let source = match load(&cli.file) {
+    // 読込エラーの対象はファイルなら指定されたパス全体、標準入力なら表示名。
+    let target = if stdin_input {
+        STDIN_NAME.into()
+    } else {
+        cli.file.to_string_lossy()
+    };
+    let loaded = if stdin_input {
+        load_stdin(|| signals.exit_code().is_some())
+    } else {
+        load(&cli.file)
+    };
+    let source = match loaded {
         Ok(s) => s,
         Err(e) => {
-            return signals.exit_code().map_or_else(
-                || error(&cli.file.to_string_lossy(), &e.to_string(), 1),
-                ExitCode::from,
-            );
+            return signals
+                .exit_code()
+                .map_or_else(|| error(&target, &e.to_string(), 1), ExitCode::from);
         }
     };
     profile::mark("load_ms");
     if let Some(code) = signals.exit_code() {
         return ExitCode::from(code);
+    }
+    if let Some(tty) = tty
+        && let Err(e) = replace_stdin(tty)
+    {
+        return error("端末", &e.to_string(), 1);
     }
     let colors = cli
         .color
@@ -84,11 +115,14 @@ fn main() -> ExitCode {
     // 本文の色の有無はレイアウトとハイライトで決める。crossterm自身のNO_COLOR対応は
     // tmuxの画像IDを伝えるセルのRGB指定まで消すため、常に色を出力できる状態にする。
     crossterm::style::force_color_output(true);
-    let name = cli
-        .file
-        .file_name()
-        .unwrap_or(cli.file.as_os_str())
-        .to_string_lossy();
+    let name = if stdin_input {
+        STDIN_NAME.into()
+    } else {
+        cli.file
+            .file_name()
+            .unwrap_or(cli.file.as_os_str())
+            .to_string_lossy()
+    };
     profile::mark("prepare_ms");
     let document = Document::parse(source);
     profile::mark("parse_ms");

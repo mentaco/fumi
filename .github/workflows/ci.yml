@@ -36,3 +36,4 @@ jobs:
       - run: python3 tests/pty_smoke.py target/debug/fumi
       - run: python3 tests/pty_v1.py target/debug/fumi
       - run: python3 tests/pty_tmux.py target/debug/fumi
+      - run: python3 tests/pty_v2.py target/debug/fumi

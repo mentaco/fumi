@@ -34,7 +34,7 @@ def terminal_settings(attributes):
 
 
 class Session:
-    def __init__(self, args, term="xterm-256color", stdin_tty=True, stdout_tty=True, stderr_tty=True, no_color=None, binary=None, extra_env=None, size=(80, 24), exec_clock_env=None):
+    def __init__(self, args, term="xterm-256color", stdin_tty=True, stdout_tty=True, stderr_tty=True, no_color=None, binary=None, extra_env=None, size=(80, 24), exec_clock_env=None, stdin_fd=None, close_fds=()):
         self.master, self.slave = os.openpty()
         self.resize(*size)
         self.before = termios.tcgetattr(self.slave)
@@ -44,6 +44,9 @@ class Session:
         self.supervisor = os.fork()
         self.status = None
         if self.supervisor == 0:
+            # パイプの書き手等を子が持ち続けると、fumiの標準入力がEOFにならない。
+            for fd in close_fds:
+                os.close(fd)
             os.close(status_read)
             os.close(keepalive_write)
             os.setsid()
@@ -79,6 +82,8 @@ class Session:
             null = os.open(os.devnull, os.O_RDWR)
             for fd, enabled in [(0, stdin_tty), (1, stdout_tty), (2, stderr_tty)]:
                 os.dup2(self.slave if enabled else null, fd)
+            if stdin_fd is not None:
+                os.dup2(stdin_fd, 0)
             os.close(self.master)
             os.close(self.slave)
             os.close(null)
@@ -325,7 +330,6 @@ def errors():
         fifo = root / "fifo"
         os.mkfifo(fifo)
         early_error([fifo])
-        early_error(["-"], code=2)
         dash = root / "-"
         dash.write_text("# dash\n", encoding="utf-8")
         session = Session([dash], stderr_tty=False)

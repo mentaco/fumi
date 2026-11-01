@@ -295,13 +295,23 @@ impl Decoder {
 }
 
 pub fn read(decoder: &mut Decoder, timeout: Duration) -> io::Result<()> {
-    let mut fd = libc::pollfd {
-        fd: 0,
-        events: libc::POLLIN,
-        revents: 0,
+    // stdinは起動時に検証済みのTTY（`fumi -` では/dev/ttyの複製）。一つの所有者だけが読み込む。
+    // macOSのpollは/dev/ttyから開いた端末を待てず、即座にPOLLNVALを返すためselectを使う。
+    let mut set = unsafe { std::mem::zeroed::<libc::fd_set>() };
+    unsafe { libc::FD_SET(0, &mut set) };
+    let mut wait = libc::timeval {
+        tv_sec: timeout.as_secs() as _,
+        tv_usec: timeout.subsec_micros() as _,
     };
-    // stdinは起動時に検証済みのTTY。一つの所有者だけが読み込む。
-    let ready = unsafe { libc::poll(&mut fd, 1, timeout.as_millis() as i32) };
+    let ready = unsafe {
+        libc::select(
+            1,
+            &mut set,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut wait,
+        )
+    };
     if ready < 0 {
         let error = io::Error::last_os_error();
         if error.kind() != io::ErrorKind::Interrupted {

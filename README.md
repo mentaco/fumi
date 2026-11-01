@@ -35,6 +35,7 @@ cargo build --release --locked
 fumi notes.md                             # 通常表示
 fumi --plain notes.md                     # 画像を使わないテキスト表示
 fumi --graphics off --color never notes.md  # 数式画像なし・色なし
+cat notes.md | fumi -                     # 標準入力から読む
 fumi --help
 ```
 
@@ -75,6 +76,5 @@ fumi --help
 
 - Markdown中の画像の表示（代替テキストのみ表示）
 - インライン数式（`$ ... $`）の画像化
-- 標準入力からの読み込み
 - ファイル変更時の自動再読み込み
 - 見出しの拡大表示

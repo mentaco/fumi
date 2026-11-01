@@ -39,7 +39,7 @@ pub struct Cli {
     /// 端末画像の方式を指定する（plain指定時は無効）
     #[arg(long, value_enum, default_value = "auto")]
     pub graphics: GraphicsMode,
-    /// 閲覧するUTF-8の通常ファイル
+    /// 閲覧するUTF-8の通常ファイル。- はパイプ・リダイレクトの標準入力
     #[arg(value_name = "FILE")]
     pub file: PathBuf,
 }
