@@ -81,6 +81,10 @@ impl Pane {
     /// 表示行を作り直したものへ替え、先頭行のソース位置へ戻す。
     fn relayout(&mut self, lines: Vec<DisplayLine>, viewport: usize) {
         let anchor = self.anchor();
+        self.relayout_at(lines, anchor, viewport);
+    }
+    /// 表示行を替え、ソース位置 `anchor` を含む行（なければ後ろで最も近い行）へ移る。
+    fn relayout_at(&mut self, lines: Vec<DisplayLine>, anchor: usize, viewport: usize) {
         self.lines = lines;
         self.top = anchored_row(&self.lines, anchor).min(self.max_top(viewport));
     }
@@ -112,6 +116,8 @@ struct DocumentState {
 pub struct App {
     body: Pane,
     doc: DocumentState,
+    /// 本文の文書の世代。差し替えるたびに増やし、古い文書から作った結果を区別する。
+    generation: u64,
     /// 検索語は文書を差し替えても残し、一致は新しい文書で求め直す（仕様3.1節）。
     search: Search,
     math_status: Status,
@@ -131,6 +137,7 @@ impl App {
         Self {
             body: Pane::new(document),
             doc: DocumentState::default(),
+            generation: 0,
             search: Search::default(),
             math_status: Default::default(),
             graphics_active: false,
@@ -148,6 +155,10 @@ impl App {
     /// 本文の文書。
     pub fn document(&self) -> &Document {
         &self.body.document
+    }
+    /// 本文の文書の世代。
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
     /// 本文の表示行。
     pub fn lines(&self) -> &[DisplayLine] {
@@ -189,6 +200,7 @@ impl App {
     }
     pub fn view_state(&self) -> ViewState<'_> {
         ViewState {
+            generation: self.generation,
             lines: &self.body.lines,
             top: self.body.top,
             rows: self.viewport(),
@@ -246,6 +258,40 @@ impl App {
         let lines = self.overlay_math(lines);
         let viewport = self.viewport();
         self.body.relayout(lines, viewport);
+    }
+
+    /// 本文の文書を差し替える（仕様3.1節）。文書の内容から作った状態を捨てて世代を進め、
+    /// 画面上端の元ソース行番号に最も近い新しい行へ移る。範囲外なら末尾へ丸める。
+    /// 検索語・入力中の検索語・ヘルプの状態は残し、一致は新しい文書で求め直す。
+    pub fn replace_document(&mut self, document: Document) {
+        let line = line_number(&self.body.document.source, self.body.anchor());
+        let anchor = line_start(&document.source, line);
+        self.body.document = document;
+        self.body.pending_g = false;
+        self.doc = DocumentState::default();
+        self.generation += 1;
+        if !self.search.query.is_empty() || self.search.input.is_some() {
+            self.doc.search_index = Some(search_segments(&self.body.document));
+        }
+        if self.width > 0 {
+            let body_width = self.body_width();
+            let lines = layout(&self.body.document, body_width, self.colors);
+            let lines = self.overlay_math(lines);
+            let viewport = self.viewport();
+            self.body.relayout_at(lines, anchor, viewport);
+            self.layout_width = body_width;
+        }
+        if !self.search.query.is_empty() {
+            // 閲覧位置は保ち、一致へは移動しない。現在の一致は確定時と同じく画面上端以降の最初。
+            self.find_matches();
+        } else {
+            self.search.matches.clear();
+            self.search.current = None;
+            self.search.index_destinations();
+        }
+        if self.search.input.is_some() {
+            self.refresh_candidates();
+        }
     }
 
     pub fn resize(&mut self, width: u16, height: u16) {
@@ -562,6 +608,12 @@ impl App {
         if !input.is_empty() {
             self.search.query = input;
         }
+        self.find_matches();
+        self.reveal_match();
+    }
+
+    /// 検索語の一致を求め、画面上端以降の最初の一致を現在の一致にする。
+    fn find_matches(&mut self) {
         self.search.matches = search::find(
             self.doc.search_index.as_deref().unwrap_or(&[]),
             &self.search.query,
@@ -576,7 +628,6 @@ impl App {
             self.search.wrapped = index == self.search.matches.len();
             Some(index % self.search.matches.len())
         };
-        self.reveal_match();
     }
 
     fn next_match(&mut self, previous: bool) {
@@ -767,6 +818,25 @@ impl App {
             Rect::new(0, self.height - 1, self.width, 1),
         );
     }
+}
+
+/// ソース位置 `position` を含む行の番号（0始まり）。
+fn line_number(source: &str, position: usize) -> usize {
+    source.as_bytes()[..position.min(source.len())]
+        .iter()
+        .filter(|&&b| b == b'\n')
+        .count()
+}
+
+/// `line` 行目（0始まり）の先頭のソース位置。行がなければ文書の末尾。
+fn line_start(source: &str, line: usize) -> usize {
+    if line == 0 {
+        return 0;
+    }
+    source
+        .match_indices('\n')
+        .nth(line - 1)
+        .map_or(source.len(), |(i, _)| i + 1)
 }
 
 /// 末尾位置を100%とする百分率。スクロール不要な場合も100%。

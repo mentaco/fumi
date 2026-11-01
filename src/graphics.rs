@@ -391,6 +391,8 @@ fn release_image(id: u32, transport: Transport, output: &mut impl Write) -> io::
 /// 画像処理が参照する本文の表示状態。UIの状態全体には依存しない。
 #[derive(Clone, Copy)]
 pub struct ViewState<'a> {
+    /// 本文の文書の世代。異なる世代の数式の結果を配置しない。
+    pub generation: u64,
     pub lines: &'a [DisplayLine],
     pub top: usize,
     /// 本文の表示行数。

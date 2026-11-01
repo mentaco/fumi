@@ -40,7 +40,12 @@ pub fn load(path: &Path) -> io::Result<String> {
     if meta.len() > MAX_BYTES {
         return Err(too_large());
     }
-    let bytes = bounded_read(file, MAX_BYTES)?;
+    decode(bounded_read(file, MAX_BYTES)?)
+}
+
+/// 読み込んだバイト列を文書の本文にする。入力元に関わらず同じ規則を使う（仕様3節）。
+/// 不正なUTF-8は置換せずエラーにし、先頭のBOMを除いてCRLFをLFへ正規化する。
+pub fn decode(bytes: Vec<u8>) -> io::Result<String> {
     let text = String::from_utf8(bytes)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "UTF-8が不正です"))?;
     Ok(text

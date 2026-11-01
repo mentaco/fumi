@@ -331,6 +331,10 @@ impl Workers {
         self.jobs.push(start_job(key)?);
         Ok(())
     }
+    /// `keep` が偽の要求のジョブを止めて回収する。
+    fn retain(&mut self, mut keep: impl FnMut(&Request) -> bool) {
+        self.jobs.retain(|job| keep(&job.key));
+    }
 }
 
 struct Entry {
@@ -391,6 +395,8 @@ impl Cache {
 }
 
 pub struct Manager {
+    /// `formulas` を作った文書の世代。
+    generation: u64,
     /// ブロック数式のソース範囲と、現在の本文幅での生成要求。
     formulas: Vec<(Range<usize>, Request)>,
     width: Option<usize>,
@@ -401,8 +407,9 @@ pub struct Manager {
     pub capabilities: Capabilities,
 }
 impl Manager {
-    pub fn new(document: &Document, capabilities: Capabilities) -> Self {
+    pub fn new(document: &Document, generation: u64, capabilities: Capabilities) -> Self {
         let mut manager = Self {
+            generation,
             formulas: Vec::new(),
             width: None,
             workers: Workers::default(),
@@ -410,11 +417,25 @@ impl Manager {
             changed: true,
             capabilities,
         };
-        manager.formulas = document
-            .display_math()
-            .map(|(node, tex)| (node.source.clone(), manager.key(tex, 0)))
-            .collect();
+        manager.set_formulas(document);
         manager
+    }
+    fn set_formulas(&mut self, document: &Document) {
+        let width = self.width.unwrap_or(0);
+        self.formulas = document
+            .display_math()
+            .map(|(node, tex)| (node.source.clone(), self.key(tex, width)))
+            .collect();
+    }
+    /// 差し替えた文書の数式へ切り替える（仕様3.1節）。新しい文書で使わない要求のジョブは止め、
+    /// 生成要求が同じ結果はキャッシュから再利用する。結果は `generation` の表示状態にだけ返す。
+    pub fn replace_document(&mut self, document: &Document, generation: u64) {
+        self.generation = generation;
+        self.set_formulas(document);
+        let formulas = &self.formulas;
+        self.workers
+            .retain(|key| formulas.iter().any(|(_, wanted)| wanted == key));
+        self.changed = true;
     }
     fn request_width(&self, width: usize) -> usize {
         if self.capabilities.transport == Transport::Tmux {
@@ -479,6 +500,10 @@ impl Manager {
     }
     /// 表示状態に合わせてジョブを進める。結果が変わり得るときだけ、数式ごとの結果を返す。
     pub fn update(&mut self, view: &ViewState) -> Option<HashMap<usize, View>> {
+        // 数式の位置は文書ごとに違うため、別の世代の表示行へ結果を返さない。
+        if view.generation != self.generation {
+            return None;
+        }
         self.set_width(view.width);
         // 実行中ジョブは位置に関わらず最大2秒で終える。古い幅の結果はキャッシュだけへ。
         for (key, view) in self.workers.collect() {
@@ -567,7 +592,7 @@ mod tests {
     #[test]
     fn cache_evicts_oldest_images_under_the_shared_budget() {
         let document = Document::parse(String::new());
-        let mut manager = Manager::new(&document, capabilities());
+        let mut manager = Manager::new(&document, 0, capabilities());
         for i in 0..3 {
             let key = manager.key(&format!("x_{i}"), 78);
             manager.cache.insert(
@@ -596,7 +621,7 @@ mod tests {
     fn update_returns_results_only_when_they_may_have_changed() {
         let mut app = App::new(Document::parse("$$ x $$".into()), "update.md", false);
         app.resize(80, 24);
-        let mut manager = Manager::new(app.document(), capabilities());
+        let mut manager = Manager::new(app.document(), app.generation(), capabilities());
         // ワーカーを起動しないよう、使う幅の結果を先に入れておく。
         for (width, reason) in [(78, "wide"), (58, "narrow")] {
             let key = manager.key("x", width);
@@ -614,10 +639,50 @@ mod tests {
         assert_eq!(manager.active_jobs(), 0);
     }
     #[test]
+    fn replacing_the_document_stops_unused_jobs_and_ignores_other_generations() {
+        let mut app = App::new(Document::parse("$$ x $$".into()), "replace.md", false);
+        app.resize(80, 24);
+        let mut manager = Manager::new(app.document(), app.generation(), capabilities());
+        for tex in ["x", "y"] {
+            let key = manager.key(tex, 78);
+            manager.cache.insert(key, View::Failed(tex.into()));
+        }
+        assert!(manager.update(&app.view_state()).is_some());
+        let child = Command::new("/bin/sleep")
+            .arg("10")
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        manager.workers.jobs.push(Job {
+            key: manager.key("gone", 78),
+            child,
+            bytes: Vec::new(),
+            start: Instant::now(),
+        });
+        set_nonblocking(manager.workers.jobs[0].child.stdout.as_ref().unwrap()).unwrap();
+        app.replace_document(Document::parse("intro\n\n$$ x $$\n\n$$ y $$\n".into()));
+        // 差し替え前の数式の位置を、新しい文書の表示行へ返さない。
+        assert!(manager.update(&app.view_state()).is_none());
+        manager.replace_document(app.document(), app.generation());
+        assert_eq!(manager.active_jobs(), 0);
+        assert_eq!(unsafe { libc::kill(pid as i32, 0) }, -1);
+        let views = manager.update(&app.view_state()).unwrap();
+        let reasons: Vec<_> = app
+            .document()
+            .display_math()
+            .map(|(node, _)| match views.get(&node.source.start) {
+                Some(View::Failed(reason)) => reason.as_str(),
+                _ => panic!("キャッシュの結果がない"),
+            })
+            .collect();
+        assert_eq!(reasons, ["x", "y"]);
+    }
+    #[test]
     fn timeout_kills_and_reaps_worker_without_waiting_for_completion() {
         let mut app = App::new(Document::parse("$$ x $$".into()), "timeout.md", false);
         app.resize(80, 24);
-        let mut manager = Manager::new(app.document(), capabilities());
+        let mut manager = Manager::new(app.document(), app.generation(), capabilities());
         let key = manager.key("x", 78);
         let child = Command::new("/bin/sleep")
             .arg("10")

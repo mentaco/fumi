@@ -267,7 +267,11 @@ fn configure_graphics(
     )? {
         Ok(capabilities) => {
             app.enable_graphics();
-            Ok(Some(Manager::new(app.document(), capabilities)))
+            Ok(Some(Manager::new(
+                app.document(),
+                app.generation(),
+                capabilities,
+            )))
         }
         Err(reason) => {
             // 利用者が画像を無効にした場合は、理由を数式に付けるだけで警告は出さない。
