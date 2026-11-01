@@ -624,52 +624,30 @@ impl App {
         if self.search.matches.is_empty() {
             return line.line.clone();
         }
+        // 対応表も書記素も表示行の先頭から順に並ぶため、位置を進めながら照合する。
+        let mut mappings = line.mappings.iter().peekable();
+        let mut destinations = line.destinations.iter().peekable();
         let mut spans = Vec::new();
         let mut offset = 0;
         for span in &line.line.spans {
             for g in span.content.graphemes(true) {
-                let source = line
-                    .mappings
-                    .iter()
-                    .find(|m| m.text.contains(&offset))
+                while mappings.next_if(|m| m.text.end <= offset).is_some() {}
+                while destinations.next_if(|d| d.text.end <= offset).is_some() {}
+                let source = mappings
+                    .peek()
+                    .filter(|m| m.text.contains(&offset))
                     .map(|m| &m.source);
+                let destination = destinations
+                    .peek()
+                    .filter(|d| d.text.contains(&offset))
+                    .copied();
+                let hit = self.search.hit(source, destination);
                 let mut style = span.style;
-                if let Some(destination) =
-                    line.destinations.iter().find(|d| d.text.contains(&offset))
-                {
-                    let target = &destination.target;
-                    if let Some(entries) = self.search.destination_matches.get(&destination.id) {
-                        let first = entries.partition_point(|(range, _)| range.end <= target.start);
-                        for (_, i) in entries[first..]
-                            .iter()
-                            .take_while(|(range, _)| range.start < target.end)
-                        {
-                            style = style.add_modifier(if self.search.current == Some(*i) {
-                                Modifier::REVERSED
-                            } else {
-                                Modifier::UNDERLINED
-                            });
-                        }
-                    }
-                } else if let Some(source) = source {
-                    let end = self
-                        .search
-                        .matches
-                        .partition_point(|m| m.start() < source.end);
-                    let start = self
-                        .search
-                        .matches
-                        .partition_point(|m| m.start() < source.start)
-                        .saturating_sub(1);
-                    for i in start..end {
-                        if self.search.matches[i].contains(source) {
-                            style = style.add_modifier(if self.search.current == Some(i) {
-                                Modifier::REVERSED
-                            } else {
-                                Modifier::UNDERLINED
-                            });
-                        }
-                    }
+                if hit.current {
+                    style = style.add_modifier(Modifier::REVERSED);
+                }
+                if hit.other {
+                    style = style.add_modifier(Modifier::UNDERLINED);
                 }
                 spans.push(Span::styled(g.to_string(), style));
                 offset += g.len();

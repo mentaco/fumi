@@ -523,37 +523,78 @@ fn table(node: &Node) -> Vec<LogicalLine> {
     result
 }
 
+/// 論理行の文字列内でのrunの位置と、その元のソース。
+struct RunSource<'a> {
+    run: &'a Run,
+    /// 論理行の文字列内でのバイト範囲。
+    start: usize,
+    end: usize,
+    /// runに対応する元のソース。
+    raw: &'a str,
+    /// runの文字列がソースにそのまま現れる場合の、`raw` 内の開始位置。
+    content_start: Option<usize>,
+    /// 書記素ごとに探す場合の、`raw` 内の次の探索開始位置。
+    cursor: usize,
+}
+
+impl<'a> RunSource<'a> {
+    fn new(run: &'a Run, start: usize, document: &'a Document) -> Self {
+        let raw = document.source.get(run.source.clone()).unwrap_or("");
+        Self {
+            run,
+            start,
+            end: start + run.text.len(),
+            raw,
+            content_start: raw.find(run.text.as_str()),
+            cursor: 0,
+        }
+    }
+
+    /// run内のバイト範囲 `local..end` に対応するソース範囲。
+    fn source(&mut self, local: usize, end: usize) -> Range<usize> {
+        let base = self.run.source.start;
+        let part = &self.run.text[local..end];
+        if self.run.destination && self.content_start.is_none() {
+            // 参照先がリンク要素のソースに現れない（参照リンク等）。要素の末尾1バイトに対応させる。
+            self.run.source.end.saturating_sub(1)..self.run.source.end
+        } else if let Some(start) = self.content_start {
+            // runの文字列がソースにそのまま現れる。
+            base + start + local..base + start + end
+        } else if let Some(start) = self.raw[self.cursor..].find(part) {
+            // エスケープ等でrun全体は一致しない。前回の続きから書記素を探す。
+            let begin = self.cursor + start;
+            self.cursor = begin + part.len();
+            base + begin..base + self.cursor
+        } else if part == " " && self.raw.chars().all(char::is_whitespace) {
+            // ソフト改行等、空白だけのソースから作った空白はrun全体に対応させる。
+            self.run.source.clone()
+        } else if self.raw[self.cursor..].starts_with('&')
+            && let Some(end) = self.raw[self.cursor..].find(';')
+        {
+            // 文字参照は、デコード前の `&...;` 全体に対応させる。
+            let begin = self.cursor;
+            self.cursor += end + 1;
+            base + begin..base + self.cursor
+        } else {
+            self.run.source.clone()
+        }
+    }
+}
+
 fn cells<'a>(
     line: &LogicalLine,
     document: &Document,
     colors: bool,
     rendered: &'a str,
 ) -> Vec<Cell<'a>> {
-    struct Mapping<'a> {
-        run: &'a Run,
-        start: usize,
-        end: usize,
-        raw: &'a str,
-        content_start: Option<usize>,
-        cursor: usize,
-    }
     let mut mappings = Vec::new();
     let mut offset = 0;
     for run in &line.runs {
         if run.text.is_empty() {
             continue;
         }
-        let start = offset;
+        mappings.push(RunSource::new(run, offset, document));
         offset += run.text.len();
-        let raw = document.source.get(run.source.clone()).unwrap_or("");
-        mappings.push(Mapping {
-            run,
-            start,
-            end: offset,
-            raw,
-            content_start: raw.find(run.text.as_str()),
-            cursor: 0,
-        });
     }
     let mut result = Vec::new();
     let mut column = 0;
@@ -575,26 +616,7 @@ fn cells<'a>(
             }
             let local = offset.saturating_sub(m.start);
             let end = (offset + g.len()).min(m.end) - m.start;
-            let part = &m.run.text[local..end];
-            let range = if m.run.destination && m.content_start.is_none() {
-                m.run.source.end.saturating_sub(1)..m.run.source.end
-            } else if let Some(start) = m.content_start {
-                m.run.source.start + start + local..m.run.source.start + start + end
-            } else if let Some(start) = m.raw[m.cursor..].find(part) {
-                let begin = m.cursor + start;
-                m.cursor = begin + part.len();
-                m.run.source.start + begin..m.run.source.start + m.cursor
-            } else if part == " " && m.raw.chars().all(char::is_whitespace) {
-                m.run.source.clone()
-            } else if m.raw[m.cursor..].starts_with('&')
-                && let Some(end) = m.raw[m.cursor..].find(';')
-            {
-                let begin = m.cursor;
-                m.cursor += end + 1;
-                m.run.source.start + begin..m.run.source.start + m.cursor
-            } else {
-                m.run.source.clone()
-            };
+            let range = m.source(local, end);
             if let Some(source) = &mut source {
                 source.end = source.end.max(range.end);
             } else {

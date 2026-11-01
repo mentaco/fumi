@@ -138,9 +138,9 @@ pub fn query(
     let start = Instant::now();
     // tmuxは外側のAPC応答をアクティブなペインへ配送する。非アクティブな
     // ペインのリサイズでは確認済みの対応状態を再利用し、寸法と色だけ更新する。
-    let mut supported =
+    let reused =
         transport == Transport::Tmux && previous.is_some_and(|c| c.transport == Transport::Tmux);
-    if transport == Transport::Tmux && !supported {
+    if transport == Transport::Tmux && !reused {
         if let Err(reason) = enable_tmux_passthrough(start + QUERY_TIMEOUT) {
             return Ok(Err(reason.into()));
         }
@@ -148,35 +148,114 @@ pub fn query(
             return Ok(Err("tmux自動設定タイムアウト".into()));
         }
     }
-    let mut placeholders = transport != Transport::Tmux || supported;
-    let probe_id = if transport == Transport::Tmux && !supported {
-        Some(next_id())
-    } else {
-        None
+    let probe_id = (transport == Transport::Tmux && !reused).then(next_id);
+    send_probes(&mut output, transport, !reused, probe_id)?;
+    let mut replies = Replies {
+        supported: reused,
+        placeholders: transport != Transport::Tmux || reused,
+        ..Default::default()
     };
-    if !supported {
+    collect_replies(decoder, &mut replies, probe_id, start)?;
+    if let Some(id) = probe_id {
+        release_image(id, transport, &mut output)?;
+        output.flush()?;
+    }
+    if !replies.supported && (mode == GraphicsMode::Auto || transport == Transport::Tmux) {
+        return Ok(Err(if transport == Transport::Tmux {
+            "tmuxで画像対応の確認に応答なし"
+        } else {
+            "画像非対応・確認に応答なし"
+        }
+        .into()));
+    }
+    if !replies.placeholders {
+        return Ok(Err("tmux用Unicode画像配置に未対応・確認に応答なし".into()));
+    }
+    let Some(cell) = cell_size(replies.cell, replies.pixels) else {
+        return Ok(Err("セル寸法不明".into()));
+    };
+    let Some(foreground) = text_color(replies.foreground, replies.background, colors) else {
+        return Ok(Err("文字色不明".into()));
+    };
+    Ok(Ok(Capabilities {
+        transport,
+        cell,
+        foreground,
+        monochrome: !colors,
+    }))
+}
+
+/// 端末の画像対応の確認で受け取った応答。
+#[derive(Default)]
+struct Replies {
+    /// Kittyの照会に成功が返ったか。
+    supported: bool,
+    /// tmux用の仮想配置に成功が返ったか。
+    placeholders: bool,
+    foreground: Option<[u8; 3]>,
+    background: Option<[u8; 3]>,
+    /// セルのピクセル寸法（幅, 高さ）。
+    cell: Option<(u16, u16)>,
+    /// ウィンドウのピクセル寸法（幅, 高さ）。
+    pixels: Option<(u16, u16)>,
+}
+impl Replies {
+    fn record(&mut self, reply: &str, probe_id: Option<u32>) {
+        if let Some((id, true)) = kitty_reply(reply) {
+            self.supported |= id == QUERY_ID;
+            self.placeholders |= Some(id) == probe_id;
+        }
+        if let Some(value) = parse_color(reply, 10) {
+            self.foreground = Some(value);
+        }
+        if let Some(value) = parse_color(reply, 11) {
+            self.background = Some(value);
+        }
+        match parse_window_report(reply) {
+            Some((6, size)) => self.cell = Some(size),
+            Some((4, size)) => self.pixels = Some(size),
+            _ => {}
+        }
+    }
+    /// 必要な応答がそろい、期限まで待たなくてよいか。
+    fn complete(&self) -> bool {
+        self.supported && self.placeholders && self.cell.is_some() && self.foreground.is_some()
+    }
+}
+
+/// Kittyの照会、tmux用の仮想配置、寸法と色の照会を送る。
+fn send_probes(
+    output: &mut impl Write,
+    transport: Transport,
+    kitty: bool,
+    probe_id: Option<u32>,
+) -> io::Result<()> {
+    if kitty {
         transport.control(
-            &mut output,
+            output,
             &format!("\x1b_Gi={QUERY_ID},s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\"),
         )?;
     }
     if let Some(id) = probe_id {
-        if let Ok(mut ids) = OWNED.lock() {
-            ids.push((id, transport));
-        }
+        register_owned(id, transport);
         // 透明な1ピクセルの仮想配置。実画像を送る前にU=1のエラーを確認する。
         transport.control(
-            &mut output,
+            output,
             &format!("\x1b_Ga=T,U=1,i={id},s=1,v=1,c=1,r=1,t=d,f=32;AAAAAA==\x1b\\"),
         )?;
     }
     // 寸法・色はtmux自身へ問い合わせる。外側端末の全画面寸法をペインへ流用しない。
     output.write_all(b"\x1b[16t\x1b[14t\x1b]11;?\x1b\\\x1b]10;?\x1b\\")?;
-    output.flush()?;
-    let mut background = None;
-    let mut foreground = None;
-    let mut cell = None;
-    let mut pixels = None;
+    output.flush()
+}
+
+/// 応答を期限まで集める。確認中に届いたキー入力は、確認後に入力の待ち行列へ戻す。
+fn collect_replies(
+    decoder: &mut Decoder,
+    replies: &mut Replies,
+    probe_id: Option<u32>,
+    start: Instant,
+) -> io::Result<()> {
     let mut users = VecDeque::new();
     while start.elapsed() < QUERY_TIMEOUT {
         input::read(
@@ -188,104 +267,49 @@ pub fn query(
         while let Some(event) = decoder.events.pop_front() {
             match event {
                 InputEvent::User(_) => users.push_back(event),
-                InputEvent::Reply(reply) => {
-                    if kitty_reply(&reply).is_some_and(|(id, ok)| id == QUERY_ID && ok) {
-                        supported = true;
-                    }
-                    if kitty_reply(&reply).is_some_and(|(id, ok)| Some(id) == probe_id && ok) {
-                        placeholders = true;
-                    }
-                    if let Some(value) = parse_color(&reply, 11) {
-                        background = Some(value);
-                    }
-                    if let Some(value) = parse_color(&reply, 10) {
-                        foreground = Some(value);
-                    }
-                    if let Some(values) = reply
-                        .strip_prefix("\x1b[")
-                        .and_then(|s| s.strip_suffix('t'))
-                    {
-                        let values = values
-                            .split(';')
-                            .map(str::parse::<u16>)
-                            .collect::<Result<Vec<_>, _>>();
-                        if let Ok(values) = values
-                            && values.len() == 3
-                            && values[1] > 0
-                            && values[2] > 0
-                        {
-                            if values[0] == 6 {
-                                cell = Some((values[2], values[1]));
-                            }
-                            if values[0] == 4 {
-                                pixels = Some((values[2], values[1]));
-                            }
-                        }
-                    }
-                }
+                InputEvent::Reply(reply) => replies.record(&reply, probe_id),
             }
         }
-        if supported && placeholders && cell.is_some() && foreground.is_some() {
+        if replies.complete() {
             break;
         }
     }
     decoder.events.extend(users);
-    if let Some(id) = probe_id {
-        release_image(id, transport, &mut output)?;
-        output.flush()?;
-    }
-    if !supported && (mode == GraphicsMode::Auto || transport == Transport::Tmux) {
-        return Ok(Err(if transport == Transport::Tmux {
-            "tmuxで画像対応の確認に応答なし"
-        } else {
-            "画像非対応・確認に応答なし"
+    Ok(())
+}
+
+/// 応答のセル寸法。応答がなければ、端末のウィンドウ寸法を行数・列数で割って求める。
+fn cell_size(reported: Option<(u16, u16)>, pixels: Option<(u16, u16)>) -> Option<(u16, u16)> {
+    let cell = reported.or_else(|| {
+        let size = crossterm::terminal::window_size().ok()?;
+        if size.columns == 0 || size.rows == 0 {
+            return None;
         }
-        .into()));
-    }
-    if !placeholders {
-        return Ok(Err("tmux用Unicode画像配置に未対応・確認に応答なし".into()));
-    }
-    if cell.is_none()
-        && let Ok(size) = crossterm::terminal::window_size()
-    {
-        if size.columns > 0 && size.rows > 0 && size.width > 0 && size.height > 0 {
-            cell = Some((size.width / size.columns, size.height / size.rows));
-        } else if let Some((w, h)) = pixels
-            && size.columns > 0
-            && size.rows > 0
-        {
-            cell = Some((w / size.columns, h / size.rows));
-        }
-    }
-    let Some(cell) = cell.filter(|(w, h)| *w > 0 && *h > 0 && *w <= 512 && *h <= 512) else {
-        return Ok(Err("セル寸法不明".into()));
-    };
-    // 数式画像の背景は透明にするため、必要なのは文字色だけ。
-    // 文字色を取得できない場合は、背景色に対して読める白か黒を選ぶ。
-    let contrast = |rgb: [u8; 3]| {
-        if luminance(rgb) > 128 {
-            [0; 3]
+        if size.width > 0 && size.height > 0 {
+            Some((size.width / size.columns, size.height / size.rows))
         } else {
-            [255; 3]
+            pixels.map(|(w, h)| (w / size.columns, h / size.rows))
         }
-    };
-    let Some(mut foreground) = foreground.or_else(|| background.map(contrast)) else {
-        return Ok(Err("文字色不明".into()));
-    };
-    if !colors {
-        // 色なしでは文字色の明るさに合わせて白か黒にする。
-        foreground = if luminance(foreground) > 128 {
-            [255; 3]
-        } else {
-            [0; 3]
-        };
-    }
-    Ok(Ok(Capabilities {
-        transport,
-        cell,
-        foreground,
-        monochrome: !colors,
-    }))
+    });
+    cell.filter(|(w, h)| *w > 0 && *h > 0 && *w <= 512 && *h <= 512)
+}
+
+/// 数式を描く色。数式画像の背景は透明にするため、必要なのは文字色だけ。
+/// 文字色を取得できない場合は、背景色に対して読める白か黒を選ぶ。
+/// 色なしでは、文字色の明るさに合わせて白か黒にする。
+fn text_color(
+    foreground: Option<[u8; 3]>,
+    background: Option<[u8; 3]>,
+    colors: bool,
+) -> Option<[u8; 3]> {
+    let white_or_black = |light: bool| if light { [255; 3] } else { [0; 3] };
+    let foreground =
+        foreground.or_else(|| background.map(|rgb| white_or_black(luminance(rgb) <= 128)))?;
+    Some(if colors {
+        foreground
+    } else {
+        white_or_black(luminance(foreground) > 128)
+    })
 }
 fn luminance(rgb: [u8; 3]) -> u8 {
     ((u32::from(rgb[0]) * 299 + u32::from(rgb[1]) * 587 + u32::from(rgb[2]) * 114) / 1000) as u8
@@ -310,6 +334,19 @@ pub fn parse_color(reply: &str, index: u8) -> Option<[u8; 3]> {
     }
     Some(rgb)
 }
+/// `CSI 種別;高さ;幅 t` のウィンドウ報告。種別と（幅, 高さ）を返す。
+fn parse_window_report(reply: &str) -> Option<(u16, (u16, u16))> {
+    let values = reply.strip_prefix("\x1b[")?.strip_suffix('t')?;
+    let values = values
+        .split(';')
+        .map(str::parse::<u16>)
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    match values[..] {
+        [kind, height, width] if height > 0 && width > 0 => Some((kind, (width, height))),
+        _ => None,
+    }
+}
 pub fn kitty_reply(reply: &str) -> Option<(u32, bool)> {
     let body = reply.strip_prefix("\x1b_G")?.strip_suffix("\x1b\\")?;
     let (keys, message) = body.split_once(';')?;
@@ -333,6 +370,13 @@ pub fn cleanup() {
             let _ = transport.control(&mut output, &delete_command(id, true));
         }
         let _ = output.flush();
+    }
+}
+
+/// 終了時に解放できるよう、このプロセスが送った画像IDを記録する。
+fn register_owned(id: u32, transport: Transport) {
+    if let Ok(mut ids) = OWNED.lock() {
+        ids.push((id, transport));
     }
 }
 
@@ -424,58 +468,16 @@ impl Kitty {
             let Some(View::Ready(image)) = views.get(&source) else {
                 continue;
             };
-            if self
-                .transferred
-                .get(&source)
-                .is_some_and(|(_, previous)| !Arc::ptr_eq(previous, image))
+            if let Some(&(id, ref previous)) = self.transferred.get(&source)
+                && !Arc::ptr_eq(previous, image)
             {
-                let (id, _) = self.transferred.remove(&source).unwrap();
+                self.transferred.remove(&source);
                 self.release(id, output)?;
             }
             if !self.transferred.contains_key(&source) {
                 let id = next_id();
-                if let Ok(mut ids) = OWNED.lock() {
-                    ids.push((id, self.transport));
-                }
-                let encoded = STANDARD.encode(&image.png);
-                // DCSのヘッダーとESCエスケープを含めても4096バイトを超えない。
-                let chunk_size = if self.transport == Transport::Tmux {
-                    3072
-                } else {
-                    4096
-                };
-                let count = encoded.len().div_ceil(chunk_size);
-                // tmuxでは失敗応答も他ペインへ入り得るため、初回照会後はquietにする。
-                let quiet = if self.transport == Transport::Tmux {
-                    2
-                } else {
-                    1
-                };
-                for (i, chunk) in encoded.as_bytes().chunks(chunk_size).enumerate() {
-                    let more = usize::from(i + 1 < count);
-                    let header = if i == 0 {
-                        format!("a=t,t=d,f=100,i={id},q={quiet},m={more}")
-                    } else {
-                        format!("m={more},q={quiet}")
-                    };
-                    // base64はASCIIなので変換は常に成立する。
-                    self.transport.control(
-                        output,
-                        &format!(
-                            "\x1b_G{header};{}\x1b\\",
-                            std::str::from_utf8(chunk).unwrap()
-                        ),
-                    )?;
-                }
-                if self.transport == Transport::Tmux {
-                    self.transport.control(
-                        output,
-                        &format!(
-                            "\x1b_Ga=p,U=1,i={id},p=1,c={},r={},C=1,q=2\x1b\\",
-                            image.columns, image.rows
-                        ),
-                    )?;
-                }
+                register_owned(id, self.transport);
+                self.transmit(id, image, output)?;
                 self.transferred.insert(source, (id, image.clone()));
             }
         }
@@ -486,10 +488,47 @@ impl Kitty {
             .copied()
             .collect();
         for source in stale {
-            let (id, _) = self.transferred.remove(&source).unwrap();
-            self.release(id, output)?;
+            if let Some((id, _)) = self.transferred.remove(&source) {
+                self.release(id, output)?;
+            }
         }
         output.flush()
+    }
+    /// 画像データを分割して送る。tmuxでは続けてUnicodeセル用の仮想配置を作る。
+    fn transmit(&self, id: u32, image: &Image, output: &mut impl Write) -> io::Result<()> {
+        let tmux = self.transport == Transport::Tmux;
+        let encoded = STANDARD.encode(&image.png);
+        // DCSのヘッダーとESCエスケープを含めても4096バイトを超えない。
+        let chunk_size = if tmux { 3072 } else { 4096 };
+        let count = encoded.len().div_ceil(chunk_size);
+        // tmuxでは失敗応答も他ペインへ入り得るため、初回照会後はquietにする。
+        let quiet = if tmux { 2 } else { 1 };
+        for (i, chunk) in encoded.as_bytes().chunks(chunk_size).enumerate() {
+            let more = usize::from(i + 1 < count);
+            let header = if i == 0 {
+                format!("a=t,t=d,f=100,i={id},q={quiet},m={more}")
+            } else {
+                format!("m={more},q={quiet}")
+            };
+            // base64はASCIIなので変換は常に成立する。
+            self.transport.control(
+                output,
+                &format!(
+                    "\x1b_G{header};{}\x1b\\",
+                    std::str::from_utf8(chunk).unwrap()
+                ),
+            )?;
+        }
+        if tmux {
+            self.transport.control(
+                output,
+                &format!(
+                    "\x1b_Ga=p,U=1,i={id},p=1,c={},r={},C=1,q=2\x1b\\",
+                    image.columns, image.rows
+                ),
+            )?;
+        }
+        Ok(())
     }
     pub fn render_placeholders(&self, view: &ViewState, frame: &mut Frame) {
         if self.transport != Transport::Tmux || view.shown_images().is_none() {
@@ -572,6 +611,29 @@ mod tests {
             Transport::Tmux.control(&mut bytes, command).unwrap();
         }
         assert_eq!(bytes, b"\x1bPtmux;\x1b\x1b_Ga=t;AAAA\x1b\x1b\\\x1b\\\x1bPtmux;\x1b\x1b_Ga=d,d=I,i=42\x1b\x1b\\\x1b\\");
+    }
+
+    #[test]
+    fn window_reports_and_text_color_fallbacks() {
+        assert_eq!(parse_window_report("\x1b[6;20;10t"), Some((6, (10, 20))));
+        assert_eq!(
+            parse_window_report("\x1b[4;480;800t"),
+            Some((4, (800, 480)))
+        );
+        assert_eq!(parse_window_report("\x1b[6;0;10t"), None);
+        assert_eq!(parse_window_report("\x1b[6;20t"), None);
+        assert_eq!(parse_window_report("\x1b[6;x;10t"), None);
+        // 文字色を優先し、なければ背景に対して読める白か黒にする。
+        assert_eq!(
+            text_color(Some([10, 20, 30]), Some([255; 3]), true),
+            Some([10, 20, 30])
+        );
+        assert_eq!(text_color(None, Some([250; 3]), true), Some([0; 3]));
+        assert_eq!(text_color(None, Some([5; 3]), true), Some([255; 3]));
+        assert_eq!(text_color(None, None, true), None);
+        // 色なしでは文字色の明るさで白か黒にする。
+        assert_eq!(text_color(Some([200; 3]), None, false), Some([255; 3]));
+        assert_eq!(text_color(Some([40; 3]), None, false), Some([0; 3]));
     }
 
     #[test]

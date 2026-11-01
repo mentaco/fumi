@@ -84,6 +84,15 @@ pub fn find(segments: &[Segment], query: &str) -> Vec<Match> {
     result
 }
 
+/// 表示中の書記素に重なる一致の種類。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Hit {
+    /// 現在の一致に含まれる。
+    pub current: bool,
+    /// 現在以外の一致に含まれる。
+    pub other: bool,
+}
+
 #[derive(Default)]
 pub struct Search {
     pub query: String,
@@ -97,6 +106,43 @@ pub struct Search {
 }
 
 impl Search {
+    /// ソース範囲 `source`、または参照先 `destination` の書記素に重なる一致。
+    /// 参照先はソースと一対一に対応しないため、参照先の位置を優先して照合する。
+    pub fn hit(&self, source: Option<&Range<usize>>, destination: Option<&Destination>) -> Hit {
+        let mut hit = Hit::default();
+        let mut mark = |i: usize| {
+            if self.current == Some(i) {
+                hit.current = true;
+            } else {
+                hit.other = true;
+            }
+        };
+        if let Some(destination) = destination {
+            let target = &destination.target;
+            if let Some(entries) = self.destination_matches.get(&destination.id) {
+                let first = entries.partition_point(|(range, _)| range.end <= target.start);
+                for (_, i) in entries[first..]
+                    .iter()
+                    .take_while(|(range, _)| range.start < target.end)
+                {
+                    mark(*i);
+                }
+            }
+        } else if let Some(source) = source {
+            let end = self.matches.partition_point(|m| m.start() < source.end);
+            let start = self
+                .matches
+                .partition_point(|m| m.start() < source.start)
+                .saturating_sub(1);
+            for i in start..end {
+                if self.matches[i].contains(source) {
+                    mark(i);
+                }
+            }
+        }
+        hit
+    }
+
     pub fn index_destinations(&mut self) {
         self.destination_matches.clear();
         for (i, matched) in self.matches.iter().enumerate() {
