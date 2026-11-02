@@ -5,6 +5,7 @@ import hashlib
 import os
 from pathlib import Path
 import re
+import select
 import signal
 import struct
 import tempfile
@@ -32,7 +33,11 @@ def respond(session, cell=(10, 20), background=True, foreground=True, malformed=
     until = time.monotonic() + 5
     while b"a=q" not in session.data:
         session.pump(.01)
-        assert time.monotonic() < until, "query timeout"
+        # 照会が来ない理由（自動設定の失敗・タイムアウト等）は、fumiの画面のラベルとステータスに出る。
+        # 途中で終了した場合（panic等）も区別できるよう、終了したかを添える。
+        if time.monotonic() >= until:
+            exited = bool(select.select([session.status_pipe], [], [], 0)[0])
+            raise AssertionError(f"query timeout (exited={exited}): " + session.visible()[-600:])
     if delay:
         # 照会を受けてから応答するまでの端末側の遅れ。
         session.pump(delay)
