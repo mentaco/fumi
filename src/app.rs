@@ -1,7 +1,10 @@
 use crate::{
     document::Document,
     graphics::ViewState,
-    layout::{DisplayLine, Mapping, anchored_row, layout, search_segments, truncate_middle},
+    layout::{
+        DisplayLine, Mapping, anchored_row, layout, layout_with_images, search_segments,
+        truncate_middle,
+    },
     math::{Status, View},
     search::{self, Search, Segment},
     source::sanitize,
@@ -31,7 +34,7 @@ const WHEEL_LINES: usize = 3;
 /// ヘルプの本文。操作の数値は定数から埋め込み、実装との食い違いを防ぐ。
 fn help_text() -> String {
     format!(
-        "# fumi 操作一覧\n\n読み取り専用Markdownビューア（v1）\n\nj / ↓ : 1表示行下\nk / ↑ : 1表示行上\nCtrl+d / Ctrl+u : 半画面下 / 上\nCtrl+f / PageDown : 1画面下（1行重複）\nCtrl+b / PageUp : 1画面上（1行重複）\ngg / Home : 先頭\nG / End : 末尾\n? : ヘルプを開閉\nR : 文書を再読込（ファイル入力のみ）\nq : ツールを終了（ヘルプ表示中も同じ）\nEsc : 検索語・ハイライトを解除、ヘルプから本文へ戻る\n/ : 検索入力（最大{SEARCH_LIMIT}書記素）\nn / N : 次 / 前の一致（循環）\nホイール : {WHEEL_LINES}表示行上下\n検索中 Enter : 確定、Esc / Ctrl+c : 取消\n検索中 Backspace : 1書記素削除、Ctrl+u : 全消去\nCtrl+c : 割り込み終了（130）\nCtrl+z : 中断、fgで復帰\n\nヘルプでも移動できます。本文位置は変わりません。\nサイズ不足中はq / Ctrl+cで終了できます。\n\nfumi - : パイプ・リダイレクトの標準入力を表示\n--plain : 端末の画像対応の確認や画像を使わないテキストTUI\n--color auto|always|never : 色の指定\n--graphics auto|off|kitty : 数式画像の方式\n--watch : ファイルの変更を監視して自動で再読込\n\n対応端末のブロック数式は画像、それ以外はTeXソースを表示します。\nMarkdown画像は代替テキストと参照先を表示します。\nリンクを開く操作はありません。"
+        "# fumi 操作一覧\n\n読み取り専用Markdownビューア（v1）\n\nj / ↓ : 1表示行下\nk / ↑ : 1表示行上\nCtrl+d / Ctrl+u : 半画面下 / 上\nCtrl+f / PageDown : 1画面下（1行重複）\nCtrl+b / PageUp : 1画面上（1行重複）\ngg / Home : 先頭\nG / End : 末尾\n? : ヘルプを開閉\nR : 文書を再読込（ファイル入力のみ）\nq : ツールを終了（ヘルプ表示中も同じ）\nEsc : 検索語・ハイライトを解除、ヘルプから本文へ戻る\n/ : 検索入力（最大{SEARCH_LIMIT}書記素）\nn / N : 次 / 前の一致（循環）\nホイール : {WHEEL_LINES}表示行上下\n検索中 Enter : 確定、Esc / Ctrl+c : 取消\n検索中 Backspace : 1書記素削除、Ctrl+u : 全消去\nCtrl+c : 割り込み終了（130）\nCtrl+z : 中断、fgで復帰\n\nヘルプでも移動できます。本文位置は変わりません。\nサイズ不足中はq / Ctrl+cで終了できます。\n\nfumi - : パイプ・リダイレクトの標準入力を表示\n--plain : 端末の画像対応の確認や画像を使わないテキストTUI\n--color auto|always|never : 色の指定\n--graphics auto|off|kitty : 数式画像の方式\n--watch : ファイルの変更を監視して自動で再読込\n\n対応端末のブロック数式は画像、それ以外はTeXソースを表示します。\n対応端末では、最上位の段落・見出しにあるローカルのPNG/JPEG画像を表示します。\nそれ以外のMarkdown画像は代替テキストと参照先を表示します。\nリンクを開く操作はありません。"
     )
 }
 
@@ -109,9 +112,9 @@ impl Pane {
 struct DocumentState {
     /// 検索用の論理文字列とソース範囲。最初の検索で作る。
     search_index: Option<Vec<Segment>>,
-    /// 数式ごとの生成結果。キーは数式のソース開始位置。
-    math_views: HashMap<usize, View>,
-    /// 画像の生成後に戻す閲覧位置。数式のソース開始位置と画像内の行。
+    /// 数式・ローカル画像ごとの生成結果。キーは要素のソース開始位置。
+    views: HashMap<usize, View>,
+    /// 画像の生成後に戻す閲覧位置。要素のソース開始位置と画像内の行。
     deferred_image_anchor: Option<(usize, usize)>,
 }
 
@@ -122,7 +125,7 @@ pub struct App {
     generation: u64,
     /// 検索語は文書を差し替えても残し、一致は新しい文書で求め直す（仕様3.1節）。
     search: Search,
-    math_status: Status,
+    graphics_status: Status,
     graphics_active: bool,
     warning: String,
     /// 次のキー操作まで表示するお知らせ。再読込の結果等。
@@ -143,7 +146,7 @@ impl App {
             doc: DocumentState::default(),
             generation: 0,
             search: Search::default(),
-            math_status: Default::default(),
+            graphics_status: Default::default(),
             graphics_active: false,
             warning: String::new(),
             notice: String::new(),
@@ -216,7 +219,7 @@ impl App {
             width: self.body_width(),
             left: self.left_margin(),
             body_visible: !self.help_visible && !self.too_small(),
-            images: self.graphics_active.then_some(&self.doc.math_views),
+            images: self.graphics_active.then_some(&self.doc.views),
         }
     }
     /// 本文の先頭行の最大値。
@@ -263,10 +266,30 @@ impl App {
 
     /// 本文の表示行を作り直し、先頭行のソース位置へ戻す。
     fn relayout(&mut self) {
-        let lines = layout(&self.body.document, self.body_width(), self.colors);
-        let lines = self.overlay_math(lines);
+        let lines = self.layout_body(self.body_width());
         let viewport = self.viewport();
         self.body.relayout(lines, viewport);
+    }
+
+    /// 本文の表示行を作る。画像表示中は、ローカル画像を前後の本文から分けた行にする。
+    fn layout_body(&self, width: usize) -> Vec<DisplayLine> {
+        let images: Vec<_> = if self.graphics_active {
+            self.body
+                .document
+                .local_images()
+                .into_iter()
+                .map(|(source, _)| source)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let lines = layout_with_images(&self.body.document, width, self.colors, &images);
+        self.overlay_images(lines)
+    }
+
+    /// 画像にする数式・ローカル画像があるか。
+    fn has_graphics_targets(&self) -> bool {
+        self.body.document.has_display_math() || !self.body.document.local_images().is_empty()
     }
 
     /// 本文の文書を差し替える（仕様3.1節）。文書の内容から作った状態を捨てて世代を進め、
@@ -284,8 +307,7 @@ impl App {
         }
         if self.width > 0 {
             let body_width = self.body_width();
-            let lines = layout(&self.body.document, body_width, self.colors);
-            let lines = self.overlay_math(lines);
+            let lines = self.layout_body(body_width);
             let viewport = self.viewport();
             self.body.relayout_at(lines, anchor, viewport);
             self.layout_width = body_width;
@@ -322,7 +344,7 @@ impl App {
         let body_width = self.body_width();
         let viewport = self.viewport();
         if self.layout_width != body_width {
-            self.doc.math_views.clear();
+            self.doc.views.clear();
             self.relayout();
             let lines = layout(&self.help.document, body_width, self.colors);
             self.help.relayout(lines, viewport);
@@ -465,16 +487,17 @@ impl App {
         Action::None
     }
 
-    pub fn set_math(&mut self, views: HashMap<usize, View>, status: Status) -> bool {
-        let same = self.math_status == status
-            && self.doc.math_views.len() == views.len()
-            && views.iter().all(
-                |(source, view)| match (view, self.doc.math_views.get(source)) {
+    /// 数式・ローカル画像の生成結果と、結果のない要素の扱いを設定する。表示が変わったら真。
+    pub fn set_images(&mut self, views: HashMap<usize, View>, status: Status) -> bool {
+        let same = self.graphics_status == status
+            && self.doc.views.len() == views.len()
+            && views
+                .iter()
+                .all(|(source, view)| match (view, self.doc.views.get(source)) {
                     (View::Ready(a), Some(View::Ready(b))) => Arc::ptr_eq(a, b),
                     (View::Failed(a), Some(View::Failed(b))) => a == b,
                     _ => false,
-                },
-            );
+                });
         if same {
             return false;
         }
@@ -482,18 +505,18 @@ impl App {
         if image_anchor.is_some() && status == Status::Pending {
             self.doc.deferred_image_anchor = image_anchor;
         }
-        self.doc.math_views = views;
-        self.math_status = status;
+        self.doc.views = views;
+        self.graphics_status = status;
         if self.too_small() {
             self.layout_width = 0;
             return false;
         }
-        if !self.body.document.has_display_math() {
+        if !self.has_graphics_targets() {
             return false;
         }
         self.relayout();
         if let Some((source, offset)) = image_anchor
-            && let Some(View::Ready(image)) = self.doc.math_views.get(&source)
+            && let Some(View::Ready(image)) = self.doc.views.get(&source)
             && let Some(row) =
                 self.body.lines.iter().position(|l| {
                     l.image == Some((source, offset.min(image.rows.saturating_sub(1))))
@@ -509,7 +532,7 @@ impl App {
     pub fn enable_graphics(&mut self) {
         self.graphics_active = true;
         self.warning.clear();
-        self.set_math(HashMap::new(), Status::Pending);
+        self.set_images(HashMap::new(), Status::Pending);
     }
 
     /// 画像表示をやめ、ブロック数式をTeX表示へ戻す。`reason` は数式に付ける理由で、
@@ -517,54 +540,77 @@ impl App {
     pub fn disable_graphics(&mut self, reason: String, warn: bool) {
         self.graphics_active = false;
         self.warning = if warn { reason.clone() } else { String::new() };
-        self.set_math(HashMap::new(), Status::Unavailable(reason));
+        self.set_images(HashMap::new(), Status::Unavailable(reason));
     }
 
-    /// ブロック数式の表示行を、画像の行またはTeXと理由のラベルにする。
-    fn overlay_math(&self, lines: Vec<DisplayLine>) -> Vec<DisplayLine> {
-        // 数式も表示行もソース順に並ぶ。前の数式の後ろから探せば、全体を一度の走査で済む。
+    /// 数式とローカル画像の表示行を、画像の行または理由のラベルにする。数式は画像の行と
+    /// `[math]` に置き換え、ローカル画像は代替テキストと参照先の行の上へ画像の行を入れる。
+    fn overlay_images(&self, lines: Vec<DisplayLine>) -> Vec<DisplayLine> {
+        let mut targets: Vec<_> = self
+            .body
+            .document
+            .display_math()
+            .map(|(node, _)| (node.source.clone(), false))
+            .collect();
+        // ローカル画像は画像表示中だけ前後の本文から分けた行になり、ラベルを付ける。
+        if self.graphics_active {
+            targets.extend(
+                self.body
+                    .document
+                    .local_images()
+                    .into_iter()
+                    .map(|(source, _)| (source, true)),
+            );
+            targets.sort_by_key(|(source, _)| source.start);
+        }
+        // 要素も表示行もソース順に並ぶ。前の要素の後ろから探せば、全体を一度の走査で済む。
         let mut edits = Vec::new();
         let mut cursor = 0;
-        for (node, _) in self.body.document.display_math() {
+        for (source, picture) in targets {
             let Some(start) = lines[cursor..]
                 .iter()
-                .position(|line| {
-                    !line.source.is_empty() && node.source.contains(&line.source.start)
-                })
+                .position(|line| !line.source.is_empty() && source.contains(&line.source.start))
                 .map(|i| cursor + i)
             else {
                 continue;
             };
             let end = lines[start..]
                 .iter()
-                .position(|line| line.source.start >= node.source.end)
+                .position(|line| line.source.start >= source.end)
                 .map_or(lines.len(), |i| start + i);
             cursor = end;
             let label = |text: String| {
                 let mappings = vec![Mapping {
                     text: 0..text.len(),
-                    source: node.source.clone(),
+                    source: source.clone(),
                 }];
-                DisplayLine::new(Line::raw(text), node.source.clone(), mappings)
+                DisplayLine::new(Line::raw(text), source.clone(), mappings)
             };
-            match self.doc.math_views.get(&node.source.start) {
+            let (kind, ready) = if picture {
+                ("image", start..start)
+            } else {
+                ("math", start..end)
+            };
+            match self.doc.views.get(&source.start) {
                 Some(View::Ready(image)) if self.graphics_active => {
                     let mut replacement: Vec<_> = (0..image.rows)
                         .map(|offset| DisplayLine {
-                            image: Some((node.source.start, offset)),
-                            ..DisplayLine::new(Line::raw(""), node.source.clone(), Vec::new())
+                            image: Some((source.start, offset)),
+                            ..DisplayLine::new(Line::raw(""), source.clone(), Vec::new())
                         })
                         .collect();
-                    replacement.push(label("[math]".into()));
-                    edits.push((start..end, replacement));
+                    if !picture {
+                        replacement.push(label("[math]".into()));
+                    }
+                    edits.push((ready, replacement));
                 }
                 value => {
                     let reason = match value {
                         Some(View::Failed(reason)) => Some(reason.as_str()),
-                        _ => self.math_status.label(),
+                        _ => self.graphics_status.label(),
                     };
                     if let Some(reason) = reason.filter(|r| !r.is_empty()) {
-                        edits.push((end..end, vec![label(format!("[math: {reason}]"))]));
+                        edits.push((end..end, vec![label(format!("[{kind}: {reason}]"))]));
                     }
                 }
             }

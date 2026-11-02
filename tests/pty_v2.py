@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
-"""v2の標準入力（`fumi -`）と再読込（`R`・`--watch`）をPTYで検証する。標準入力のキー入力は制御端末（/dev/tty）から送る。"""
+"""v2の標準入力（`fumi -`）・再読込（`R`・`--watch`）・ローカル画像をPTYで検証する。標準入力のキー入力は制御端末（/dev/tty）から送る。"""
+import base64
 import os
 from pathlib import Path
 import signal
+import struct
 import subprocess
 import tempfile
 import threading
 import time
+import zlib
 from pty_smoke import BINARY, Session, case
-from pty_v1 import V1, commands, started_kitty
+from pty_v1 import V1, commands, respond, started_kitty
 
 DOCUMENT = "\ufeff# 標準入力\r\n\r\n本文の行\r\n".encode("utf-8")
 
@@ -66,7 +69,12 @@ def pipe_display_and_keys():
         assert "/本文 1/1" in session.screen()[-1], session.screen()[-1]
         session.send(b"R")
         assert "stdinは再読込できません" in status(session), status(session)
-        session.send(b"?G")
+        # ヘルプを1画面ずつ送り、起動方法の説明を探す。
+        session.send(b"?")
+        for _ in range(6):
+            if any("fumi -" in row for row in session.screen()):
+                break
+            session.send(b"\x06")
         assert any("fumi -" in row for row in session.screen()), session.screen()
         session.send(b"q")
         session.wait(0)
@@ -259,6 +267,163 @@ def watch_reload():
             session.close()
 
 
+def png(width, height, rgba):
+    """単色のRGBA PNG。"""
+    def chunk(kind, data):
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+    raw = b"".join(b"\x00" + bytes(rgba) * width for _ in range(height))
+    header = struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0)
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b"")
+
+
+def transferred(session, since=0):
+    """直接転送された画像のPNG。"""
+    result, payload = [], bytearray()
+    for fields, data in commands(session, since):
+        if fields.get(b"a") == b"t":
+            payload = bytearray()
+        if data and (fields.get(b"a") == b"t" or b"m" in fields):
+            payload.extend(data)
+            if fields.get(b"m") == b"0":
+                result.append(base64.b64decode(payload))
+    return result
+
+
+def wait_placed(session, since=0):
+    until = time.monotonic() + 6
+    while not any(f.get(b"a") == b"p" for f, _ in commands(session, since)):
+        session.pump(.02)
+        assert time.monotonic() < until, session.visible()[-600:]
+    session.pump(.2)
+
+
+def image_session(args, reply=None, **kwargs):
+    session = Session(args, **kwargs)
+    respond(session, **(reply or {}))
+    return session
+
+
+def local_images():
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        (root / "docs" / "img").mkdir(parents=True)
+        (root / "docs" / "img" / "cat.png").write_bytes(png(40, 30, (255, 0, 0, 255)))
+        document = root / "docs" / "doc.md"
+        document.write_text(
+            "前の文 ![猫の絵](img/cat.png) 後の文\n\n- ![リスト](img/cat.png)\n\n"
+            "![遠隔](https://example.com/cat.png) ![ない](none.png)\n",
+            encoding="utf-8",
+        )
+        before = document.read_bytes()
+        payloads = []
+        for args in [[document], ["--color", "never", document]]:
+            session = image_session(args)
+            try:
+                wait_placed(session)
+                pngs = transferred(session)
+                # 文書の所在からの相対参照を読み、40×30をセル（10×20）の境界まで埋めて送る。
+                assert len(pngs) == 1, len(pngs)
+                assert struct.unpack(">II", pngs[0][16:24]) == (40, 40)
+                payloads.append(pngs[0])
+                screen = session.screen()
+                assert any(row.strip() == "前の文" for row in screen), screen
+                assert any(row.strip() == "[image: 猫の絵] <img/cat.png>" for row in screen), screen
+                assert any(row.strip() == "後の文" for row in screen), screen
+                # リストの中・遠隔の画像は代替テキストのまま。ないファイルは理由を出す。
+                assert any("• [image: リスト] <img/cat.png>" in row for row in screen), screen
+                assert any("[image: 遠隔] <https://example.com/cat.png>" in row for row in screen), screen
+                assert any("[image: ファイルが見つかりません]" in row for row in screen), screen
+                session.send(b"q")
+                session.wait(0)
+            finally:
+                session.close()
+        # 色なしの指定は本文装飾だけに効き、画像は元の色のまま送る。
+        assert payloads[0] == payloads[1]
+        assert document.read_bytes() == before
+        # シンボリックリンクから開いた場合も、指定したパス側の所在を基準にする。
+        link = root / "link.md"
+        link.symlink_to(document)
+        session = image_session([link])
+        try:
+            session.pump(1.0)
+            assert not transferred(session)
+            assert any("[image: ファイルが見つかりません]" in row for row in session.screen())
+            session.send(b"q")
+            session.wait(0)
+        finally:
+            session.close()
+
+
+def images_from_stdin_use_the_working_directory():
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        (root / "cat.png").write_bytes(png(10, 20, (0, 0, 255, 255)))
+        session, thread, _ = piped("![猫](cat.png)\n".encode(), cwd=root)
+        try:
+            respond(session)
+            wait_placed(session)
+            assert struct.unpack(">II", transferred(session)[0][16:24]) == (10, 20)
+            session.send(b"q")
+            session.wait(0)
+        finally:
+            thread.join()
+            session.close()
+
+
+def images_without_colors_and_in_plain():
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        (root / "cat.png").write_bytes(png(10, 20, (0, 255, 0, 255)))
+        document = root / "doc.md"
+        document.write_text("$$ x $$\n\n![猫](cat.png)\n", encoding="utf-8")
+        # 文字色も背景色も分からない端末でも、画像は表示し、数式だけをTeX表示へ戻す。
+        session = image_session([document], reply={"background": False, "foreground": False})
+        try:
+            wait_placed(session)
+            assert len(transferred(session)) == 1
+            assert any("[math: 文字色不明]" in row for row in session.screen()), session.screen()
+            assert "KITTY" in session.screen()[-1]
+            session.send(b"q")
+            session.wait(0)
+        finally:
+            session.close()
+        session = Session(["--plain", document])
+        try:
+            session.started()
+            session.pump(.3)
+            assert b"a=q" not in session.data and b"a=t" not in session.data
+            assert any(row.strip() == "[image: 猫] <cat.png>" for row in session.screen())
+            session.send(b"q")
+            session.wait(0)
+        finally:
+            session.close()
+
+
+def reload_reads_changed_images():
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        image = root / "cat.png"
+        image.write_bytes(png(10, 20, (255, 0, 0, 255)))
+        document = root / "doc.md"
+        document.write_text("![猫](cat.png)\n", encoding="utf-8")
+        session = image_session([document])
+        try:
+            wait_placed(session)
+            first = transferred(session)
+            # 画像そのものは監視しない。文書を読み直したときに、書き換わった画像も読み直す。
+            image.write_bytes(png(20, 20, (0, 0, 255, 255)))
+            since = len(session.data)
+            session.send(b"R")
+            wait_placed(session, since)
+            second = transferred(session, since)
+            assert second and struct.unpack(">II", second[0][16:24]) == (20, 20), second
+            assert first[0] != second[0]
+            session.send(b"q")
+            session.wait(0)
+        finally:
+            session.close()
+
+
 def startup_errors():
     session = Session(["-"])
     try:
@@ -342,3 +507,7 @@ if __name__ == "__main__":
     case("再読込で数式が現れたら画像対応を確認", reload_adds_math)
     case("再読込で数式が変わると画像を送り直し、古い画像を解放", reload_replaces_math_images)
     case("--watchの自動再読込・変化なし・削除と復旧", watch_reload)
+    case("ローカル画像・相対参照・色なしでも元の色・対象外の画像・シンボリックリンクの基準", local_images)
+    case("標準入力の画像は作業ディレクトリが基準", images_from_stdin_use_the_working_directory)
+    case("色の応答なしでも画像は表示・plainでは画像なし", images_without_colors_and_in_plain)
+    case("再読込で書き換わった画像を読み直す", reload_reads_changed_images)

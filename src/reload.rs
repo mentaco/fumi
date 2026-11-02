@@ -13,7 +13,7 @@ use std::{
 pub const WATCH_INTERVAL: Duration = Duration::from_millis(200);
 
 /// 変更の判定に使うファイルの状態。更新時刻（ナノ秒）・サイズ・inode・デバイス。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Stamp {
     modified: (i64, i64),
     size: u64,

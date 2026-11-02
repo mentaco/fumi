@@ -34,7 +34,7 @@ def terminal_settings(attributes):
 
 
 class Session:
-    def __init__(self, args, term="xterm-256color", stdin_tty=True, stdout_tty=True, stderr_tty=True, no_color=None, binary=None, extra_env=None, size=(80, 24), exec_clock_env=None, stdin_fd=None, close_fds=()):
+    def __init__(self, args, term="xterm-256color", stdin_tty=True, stdout_tty=True, stderr_tty=True, no_color=None, binary=None, extra_env=None, size=(80, 24), exec_clock_env=None, stdin_fd=None, close_fds=(), cwd=None):
         self.master, self.slave = os.openpty()
         self.resize(*size)
         self.before = termios.tcgetattr(self.slave)
@@ -102,6 +102,8 @@ class Session:
             if extra_env:
                 os.environ.update(extra_env)
             executable = binary or BINARY
+            if cwd is not None:
+                os.chdir(cwd)
             if exec_clock_env:
                 os.environ[exec_clock_env] = str(time.clock_gettime_ns(time.CLOCK_MONOTONIC))
             os.execv(executable, [executable] + [str(arg) for arg in args])

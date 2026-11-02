@@ -187,7 +187,8 @@ fn blank(lines: &mut Vec<LogicalLine>, source: usize) {
     }
 }
 
-fn sequence(nodes: &[Node], gaps: bool, width: usize) -> Vec<LogicalLine> {
+/// `images` は画像として表示する要素の範囲。最上位の段落・見出しでだけ使い、入れ子では空にする。
+fn sequence(nodes: &[Node], gaps: bool, width: usize, images: &[Range<usize>]) -> Vec<LogicalLine> {
     let mut lines = Vec::new();
     let mut i = 0;
     while i < nodes.len() {
@@ -196,7 +197,7 @@ fn sequence(nodes: &[Node], gaps: bool, width: usize) -> Vec<LogicalLine> {
             blank(&mut lines, node.source.start);
         }
         if is_block(node) {
-            lines.extend(block(node, width));
+            lines.extend(block(node, width, images));
             i += 1;
         } else {
             let start = i;
@@ -211,7 +212,56 @@ fn sequence(nodes: &[Node], gaps: bool, width: usize) -> Vec<LogicalLine> {
     lines
 }
 
-fn block(node: &Node, width: usize) -> Vec<LogicalLine> {
+/// 画像として表示する要素の前後で行を分ける（仕様8.3節）。区切りの前の行末と後の行頭には
+/// 空白を残さない。
+fn split_images(runs: Vec<Run>, images: &[Range<usize>]) -> Vec<Run> {
+    if images.is_empty() {
+        return runs;
+    }
+    let image_of = |run: &Run| {
+        images
+            .iter()
+            .position(|r| r.start <= run.source.start && run.source.end <= r.end)
+    };
+    let mut result: Vec<Run> = Vec::with_capacity(runs.len() + 2);
+    let mut current = None;
+    for mut run in runs {
+        let image = image_of(&run);
+        if image == current {
+            result.push(run);
+            continue;
+        }
+        let leaving = image.is_none();
+        current = image;
+        // 区切りの前後の本文は行末・行頭の空白を除く。ソースとの対応は文字列の検索で保たれる。
+        if leaving && !result.is_empty() {
+            run.text = run.text.trim_start().into();
+        } else if let Some(last) = result.last_mut().filter(|last| !last.source.is_empty()) {
+            // 見出しの記号等の生成した文字列は除かない。
+            last.text = last.text.trim_end().into();
+        }
+        match result.last_mut() {
+            None => {}
+            Some(last) if last.text == "\n" => {}
+            Some(last) => {
+                let (style, at) = (last.style, last.source.end);
+                result.push(Run {
+                    text: "\n".into(),
+                    style,
+                    source: at..at,
+                    destination: false,
+                });
+            }
+        }
+        // 空白だけの本文（連続する画像の間の改行等）は、区切りの改行と重ねない。
+        if !run.text.is_empty() {
+            result.push(run);
+        }
+    }
+    result
+}
+
+fn block(node: &Node, width: usize, images: &[Range<usize>]) -> Vec<LogicalLine> {
     let base = || LogicalLine::new(node.source.start, Vec::new());
     match &node.kind {
         Kind::Rule => vec![LogicalLine {
@@ -233,15 +283,21 @@ fn block(node: &Node, width: usize) -> Vec<LogicalLine> {
                 node.source.start..node.source.start,
             )];
             inline(&node.children, style, &mut runs);
-            vec![LogicalLine { runs, ..base() }]
+            vec![LogicalLine {
+                runs: split_images(runs, images),
+                ..base()
+            }]
         }
         Kind::Element(Tag::Paragraph | Tag::HtmlBlock) => {
             let mut runs = Vec::new();
             inline(&node.children, Style::default(), &mut runs);
-            vec![LogicalLine { runs, ..base() }]
+            vec![LogicalLine {
+                runs: split_images(runs, images),
+                ..base()
+            }]
         }
         Kind::Element(Tag::BlockQuote(_)) => {
-            let mut lines = sequence(&node.children, true, width.saturating_sub(2));
+            let mut lines = sequence(&node.children, true, width.saturating_sub(2), &[]);
             for line in &mut lines {
                 line.prefix.insert_str(0, "│ ");
                 line.continuation.insert_str(0, "│ ");
@@ -263,8 +319,12 @@ fn block(node: &Node, width: usize) -> Vec<LogicalLine> {
                 if loose {
                     blank(&mut lines, item.source.start);
                 }
-                let mut contents =
-                    sequence(&item.children, loose, width.saturating_sub(marker.width()));
+                let mut contents = sequence(
+                    &item.children,
+                    loose,
+                    width.saturating_sub(marker.width()),
+                    &[],
+                );
                 if contents.is_empty() {
                     contents.push(LogicalLine::new(item.source.start, Vec::new()));
                 }
@@ -325,7 +385,7 @@ fn block(node: &Node, width: usize) -> Vec<LogicalLine> {
         Kind::Element(Tag::Table(alignments)) => {
             grid_table(node, alignments, width).unwrap_or_else(|| table(node))
         }
-        _ => sequence(&node.children, true, width.saturating_sub(2)),
+        _ => sequence(&node.children, true, width.saturating_sub(2), &[]),
     }
 }
 
@@ -664,10 +724,21 @@ fn cells<'a>(
 }
 
 pub fn layout(document: &Document, width: usize, colors: bool) -> Vec<DisplayLine> {
+    layout_with_images(document, width, colors, &[])
+}
+
+/// `images` の範囲の画像を、前後の本文から分けた行にして表示行を作る。範囲は
+/// `Document::local_images` が返す最上位の段落・見出しの画像に限る。
+pub fn layout_with_images(
+    document: &Document,
+    width: usize,
+    colors: bool,
+    images: &[Range<usize>],
+) -> Vec<DisplayLine> {
     if width == 0 {
         return Vec::new();
     }
-    let mut logical = sequence(&document.nodes, true, width);
+    let mut logical = sequence(&document.nodes, true, width, images);
     if logical.is_empty() {
         logical.push(LogicalLine::new(
             0,
@@ -853,7 +924,7 @@ fn display_line(prefix: String, cells: &[Cell], source: Range<usize>) -> Display
 /// 折返し・表形式によらない論理文字列とUTF-8ソース範囲。生成ラベルは除く。
 pub fn search_segments(document: &Document) -> Vec<Segment> {
     let mut result = Vec::new();
-    for line in sequence(&document.nodes, true, 0) {
+    for line in sequence(&document.nodes, true, 0, &[]) {
         let rendered: String = line
             .runs
             .iter()

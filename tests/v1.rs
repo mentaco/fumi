@@ -358,7 +358,7 @@ fn math_overlay_preserves_source_position_and_search_jump() {
     let source = app.document().source.find("$$").unwrap();
     let image = Arc::new(math::render(&request(r"\frac{1}{2}")).unwrap());
     app.enable_graphics();
-    app.set_math(
+    app.set_images(
         [(source, View::Ready(image.clone()))].into(),
         Status::Pending,
     );
@@ -368,7 +368,7 @@ fn math_overlay_preserves_source_position_and_search_jump() {
         .position(|l| l.image == Some((source, 1)))
         .unwrap();
     app.scroll_to(row);
-    app.set_math([(source, View::Ready(image.clone()))].into(), Status::Idle);
+    app.set_images([(source, View::Ready(image.clone()))].into(), Status::Idle);
     assert_eq!(app.top(), row);
     query(&mut app, "frac");
     assert_eq!(app.search().matches.len(), 1);
@@ -415,7 +415,7 @@ fn several_formulas_keep_document_order_with_images_and_reasons() {
         rows: 2,
     });
     app.enable_graphics();
-    app.set_math(
+    app.set_images(
         [
             (sources[0], View::Ready(image.clone())),
             (sources[1], View::Failed("幅超過".into())),
@@ -464,10 +464,10 @@ fn image_row_offset_survives_a_width_change_and_generation() {
     ));
     let image = Arc::new(math::render(&request(r"\frac{1}{2}")).unwrap());
     app.enable_graphics();
-    app.set_math([(0, View::Ready(image.clone()))].into(), Status::Pending);
+    app.set_images([(0, View::Ready(image.clone()))].into(), Status::Pending);
     app.scroll_to(1);
     app.resize(30, 8);
-    app.set_math([(0, View::Ready(image))].into(), Status::Pending);
+    app.set_images([(0, View::Ready(image))].into(), Status::Pending);
     assert_eq!(app.lines()[app.top()].image, Some((0, 1)));
 }
 
@@ -553,7 +553,7 @@ fn generation_update_at_tiny_size_does_not_reuse_a_tiny_layout_after_expansion()
     let mut app = app("$$ x $$\n\n日本語の文章を通常の幅で表示する。");
     let expected: Vec<_> = app.lines().iter().map(|line| line.text()).collect();
     app.resize(10, 2);
-    app.set_math(Default::default(), Status::Pending);
+    app.set_images(Default::default(), Status::Pending);
     app.resize(40, 8);
     assert_eq!(
         app.lines()

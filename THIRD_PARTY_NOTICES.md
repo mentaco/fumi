@@ -6,7 +6,9 @@ fumi本体の[MIT License](LICENSE)とは別に、依存ライブラリ、フォ
 
 採用バージョンは[Cargo.lock](Cargo.lock)、直接依存は[Cargo.toml](Cargo.toml)に記録しています。ソースリポジトリにはCargoが取得する依存クレート自体を同梱していません。
 
-数式生成には[RaTeX](https://github.com/erweixin/RaTeX) 0.1.15、コードハイライトには[syntect](https://github.com/trishume/syntect) 5.3.0を使用します。両者のクレートのライセンス表記はMITです。推移的依存とsyntect内の構文・テーマ等は、各配布物の通知も確認してください。この文書は全依存のライセンス全文を集約したものではありません。
+数式生成には[RaTeX](https://github.com/erweixin/RaTeX) 0.1.15、コードハイライトには[syntect](https://github.com/trishume/syntect) 5.3.0を使用します。両者のクレートのライセンス表記はMITです。
+
+ローカル画像のデコードには[image](https://github.com/image-rs/image) 0.25.10（MIT OR Apache-2.0）をPNG/JPEGの機能だけで使用します。これに伴い、`png` 0.18.1（MIT OR Apache-2.0）、`zune-jpeg` 0.5.15・`zune-core` 0.5.3（MIT OR Apache-2.0 OR Zlib）、`moxcms` 0.8.1・`pxfm` 0.1.30（BSD-3-Clause OR Apache-2.0）、`byteorder-lite` 0.1.0（Unlicense OR MIT）、`num-traits` 0.2.19（MIT OR Apache-2.0）が加わります。ライセンス表記は各クレートの`Cargo.toml`で確認しました。推移的依存とsyntect内の構文・テーマ等は、各配布物の通知も確認してください。この文書は全依存のライセンス全文を集約したものではありません。
 
 バイナリ配布物を作る際は、使用するターゲット・feature・Cargo.lockに対応する依存関係のライセンスと通知を集約し、この文書と`licenses/`も配布物へ含めてください。バイナリ配布用の通知一式は今回のソース公開準備では未作成です。
 

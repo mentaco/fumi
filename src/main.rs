@@ -24,8 +24,8 @@ fn error(target: &str, message: &str, code: u8) -> ExitCode {
 }
 
 fn main() -> ExitCode {
-    if std::env::var_os("FUMI_INTERNAL_MATH_WORKER").as_deref() == Some(std::ffi::OsStr::new("1")) {
-        return ExitCode::from(fumi::math::worker());
+    if std::env::var_os(fumi::jobs::WORKER_ENV).as_deref() == Some(std::ffi::OsStr::new("1")) {
+        return ExitCode::from(fumi::jobs::worker());
     }
     profile::start();
     let cli = match Cli::try_parse() {
@@ -134,10 +134,17 @@ fn main() -> ExitCode {
     profile::mark("parse_ms");
     let app = App::new(document, &name, colors);
     profile::mark("app_ms");
+    // 相対参照の画像は、指定されたパス側の所在ディレクトリを基準にする。シンボリックリンクの
+    // 実体側へ解決しない。標準入力では作業ディレクトリを基準にする（仕様2.4・8.3節）。
+    let image_base = match cli.file.parent() {
+        Some(parent) if !stdin_input && !parent.as_os_str().is_empty() => parent.into(),
+        _ => std::path::PathBuf::from("."),
+    };
     let options = GraphicsOptions {
         mode: cli.graphics,
         plain: cli.plain,
         colors,
+        image_base,
     };
     let reloader = match read {
         Some(read) => Some(Reloader::watching(
@@ -147,7 +154,7 @@ fn main() -> ExitCode {
         )),
         None => (!stdin_input).then(|| Reloader::new(cli.file.clone())),
     };
-    match run(app, &signals, options, reloader) {
+    match run(app, &signals, &options, reloader) {
         Ok(code) => ExitCode::from(code),
         Err(e) => error("端末", &e.to_string(), 1),
     }

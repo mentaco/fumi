@@ -118,7 +118,9 @@ fn enable_tmux_passthrough(deadline: Instant) -> Result<(), &'static str> {
 pub struct Capabilities {
     pub transport: Transport,
     pub cell: (u16, u16),
-    pub foreground: [u8; 3],
+    /// 数式を描く色。取得できなければ `None` で、数式はTeX表示へ戻す。
+    /// ローカル画像は元の色で描くため、文字色がなくても表示できる（仕様8.3節）。
+    pub foreground: Option<[u8; 3]>,
     pub monochrome: bool,
 }
 
@@ -176,13 +178,10 @@ pub fn query(
     let Some(cell) = cell_size(replies.cell, replies.pixels) else {
         return Ok(Err("セル寸法不明".into()));
     };
-    let Some(foreground) = text_color(replies.foreground, replies.background, colors) else {
-        return Ok(Err("文字色不明".into()));
-    };
     Ok(Ok(Capabilities {
         transport,
         cell,
-        foreground,
+        foreground: text_color(replies.foreground, replies.background, colors),
         monochrome: !colors,
     }))
 }
@@ -664,7 +663,7 @@ mod tests {
             columns: 3,
             rows: 4,
         });
-        app.set_math(
+        app.set_images(
             HashMap::from([(source, View::Ready(image.clone()))]),
             Default::default(),
         );

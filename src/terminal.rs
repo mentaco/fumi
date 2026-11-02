@@ -3,7 +3,8 @@ use crate::{
     cli::GraphicsMode,
     graphics::{Capabilities, Kitty},
     input::{Decoder, InputEvent},
-    math::{Manager, Status},
+    jobs::Manager,
+    math::Status,
     reload::{self, Reloader},
 };
 use crossterm::{
@@ -153,18 +154,20 @@ impl Drop for Guard {
 }
 
 /// 端末の画像対応の確認と画像生成に使うCLI指定。
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct GraphicsOptions {
     pub mode: GraphicsMode,
     pub plain: bool,
     pub colors: bool,
+    /// 相対参照の画像の基準ディレクトリ。ファイル入力ならその所在、標準入力なら作業ディレクトリ。
+    pub image_base: std::path::PathBuf,
 }
 
 /// `reloader` はファイル入力のときだけ渡す。標準入力は読み直せない（仕様2.4節）。
 pub fn run(
     mut app: App,
     signals: &Signals,
-    options: GraphicsOptions,
+    options: &GraphicsOptions,
     mut reloader: Option<Reloader>,
 ) -> io::Result<u8> {
     install_panic_hook();
@@ -187,7 +190,7 @@ pub fn run(
     let mut kitty = Kitty::default();
     let mut math = configure_graphics(&mut app, options, &mut decoder, None)?;
     // 画像表示の可否を決めたか。数式のない文書では決めず、再読込で数式が現れたときに確かめる。
-    let mut graphics_decided = app.document().has_display_math();
+    let mut graphics_decided = has_graphics(&app);
     let mut dirty = true;
     let mut last_draw = Instant::now() - Duration::from_secs(1);
     loop {
@@ -216,7 +219,7 @@ pub fn run(
                     app.replace_document(document);
                     if let Some(manager) = &mut math {
                         manager.replace_document(app.document(), app.generation());
-                    } else if !graphics_decided && app.document().has_display_math() {
+                    } else if !graphics_decided && has_graphics(&app) {
                         math = configure_graphics(&mut app, options, &mut decoder, None)?;
                         graphics_decided = true;
                     }
@@ -230,7 +233,7 @@ pub fn run(
         if let Some(manager) = &mut math
             && let Some(views) = manager.update(&app.view_state())
         {
-            dirty |= app.set_math(views, Status::Pending);
+            dirty |= app.set_images(views, Status::Pending);
         }
         if dirty && last_draw.elapsed() >= FRAME {
             kitty.clear_placements(terminal.backend_mut())?;
@@ -305,7 +308,7 @@ pub fn run(
             let size = terminal::size()?;
             app.resize(size.0, size.1);
             math = configure_graphics(&mut app, options, &mut decoder, None)?;
-            graphics_decided = app.document().has_display_math();
+            graphics_decided = has_graphics(&app);
             terminal.clear()?;
             dirty = true;
         }
@@ -321,12 +324,13 @@ fn disable_graphics(app: &mut App, kitty: &mut Kitty, math: &mut Option<Manager>
 
 fn configure_graphics(
     app: &mut App,
-    options: GraphicsOptions,
+    options: &GraphicsOptions,
     decoder: &mut Decoder,
     previous: Option<Capabilities>,
 ) -> io::Result<Option<Manager>> {
-    // 画像化する数式がなければ、端末の画像対応を確かめない。再読込で数式が現れたら呼び直す。
-    if !app.document().has_display_math() {
+    // 画像にする数式・ローカル画像がなければ、端末の画像対応を確かめない。
+    // 再読込で現れたら呼び直す。
+    if !has_graphics(app) {
         return Ok(None);
     }
     match crate::graphics::query(
@@ -336,10 +340,18 @@ fn configure_graphics(
         decoder,
         previous,
     )? {
+        // 文字色がなければ数式は描けない。ローカル画像もなければ画像表示にしない。
+        Ok(capabilities)
+            if capabilities.foreground.is_none() && app.document().local_images().is_empty() =>
+        {
+            app.disable_graphics("文字色不明".into(), true);
+            Ok(None)
+        }
         Ok(capabilities) => {
             app.enable_graphics();
             Ok(Some(Manager::new(
                 app.document(),
+                &options.image_base,
                 app.generation(),
                 capabilities,
             )))
@@ -351,6 +363,11 @@ fn configure_graphics(
             Ok(None)
         }
     }
+}
+
+/// 画像にする数式・ローカル画像があるか。
+fn has_graphics(app: &App) -> bool {
+    app.document().has_display_math() || !app.document().local_images().is_empty()
 }
 
 fn install_panic_hook() {

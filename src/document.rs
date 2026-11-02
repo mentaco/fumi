@@ -1,5 +1,6 @@
+use crate::picture::local_path;
 use pulldown_cmark::{Event, Options, Parser, Tag};
-use std::ops::Range;
+use std::{ops::Range, path::PathBuf};
 
 #[derive(Debug)]
 pub enum Kind {
@@ -247,6 +248,36 @@ impl Document {
 
     pub fn has_display_math(&self) -> bool {
         self.display_math().next().is_some()
+    }
+
+    /// 画像として表示するローカル画像の範囲と参照先のパス（仕様8.3節）。対象は最上位の段落・
+    /// 見出しの画像で、強調等の中も含む。リンク・リスト・引用・表の中は代替テキストのまま。
+    pub fn local_images(&self) -> Vec<(Range<usize>, PathBuf)> {
+        fn visit(nodes: &[Node], out: &mut Vec<(Range<usize>, PathBuf)>) {
+            for node in nodes {
+                match &node.kind {
+                    Kind::Element(Tag::Image { dest_url, .. }) => {
+                        if let Some(path) = local_path(dest_url) {
+                            out.push((node.source.clone(), path));
+                        }
+                    }
+                    Kind::Element(Tag::Emphasis | Tag::Strong | Tag::Strikethrough) => {
+                        visit(&node.children, out)
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let mut images = Vec::new();
+        for node in &self.nodes {
+            if matches!(
+                node.kind,
+                Kind::Element(Tag::Paragraph | Tag::Heading { .. })
+            ) {
+                visit(&node.children, &mut images);
+            }
+        }
+        images
     }
 
     pub fn parse(source: String) -> Self {

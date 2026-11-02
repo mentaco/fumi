@@ -198,7 +198,7 @@ fn replacing_discards_math_results_of_the_old_document() {
         .unwrap(),
     );
     app.enable_graphics();
-    app.set_math([(0, View::Ready(image))].into(), Status::Pending);
+    app.set_images([(0, View::Ready(image))].into(), Status::Pending);
     assert!(app.lines().iter().any(|l| l.image.is_some()));
     // 同じ位置に別の数式がある文書へ替えても、旧文書の画像を配置しない。
     app.replace_document(Document::parse("$$ y $$\n\nbody".into()));

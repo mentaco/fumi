@@ -1,29 +1,10 @@
-//! 数式は同じバイナリの隔離ワーカーで処理し、UI側で期限・世代・容量を管理する。
-use crate::{
-    document::Document,
-    graphics::{Capabilities, PLACEHOLDER_COLUMNS, Transport, ViewState},
-    layout::anchored_row,
-};
+//! ブロック数式の画像化。処理は同じバイナリの隔離ワーカーで行う（`jobs` を参照）。
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::HashMap,
-    io::{self, Read, Write},
-    ops::Range,
-    os::fd::AsRawFd,
-    process::{Child, Command, Stdio},
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{io, sync::Arc};
 
 pub const MAX_TEX: usize = 16 * 1024;
-pub const CACHE_LIMIT: usize = 128 * 1024 * 1024;
-const OUTPUT_LIMIT: usize = 8 * 1024 * 1024;
-/// キャッシュに保持する結果の件数上限。容量は `CACHE_LIMIT` でも制限する。
-const CACHE_ENTRIES: usize = 4096;
-/// 同時に実行するワーカーの上限。
-const MAX_JOBS: usize = 2;
-/// ワーカー1件の実行時間の上限。超えたらkillして回収する。
-const JOB_TIMEOUT: Duration = Duration::from_secs(2);
+/// ワーカーが返す画像の上限。
+pub(crate) const OUTPUT_LIMIT: usize = 8 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Request {
@@ -42,7 +23,7 @@ pub struct Image {
     pub rows: usize,
 }
 impl Image {
-    fn cost(&self) -> usize {
+    pub(crate) fn cost(&self) -> usize {
         self.png.len() + self.width as usize * self.height as usize * 4
     }
 }
@@ -74,7 +55,7 @@ impl Status {
 }
 
 /// PNG署名に続くIHDRから幅と高さを読む。
-fn png_dimensions(png: &[u8]) -> Option<(u32, u32)> {
+pub(crate) fn png_dimensions(png: &[u8]) -> Option<(u32, u32)> {
     if !png.starts_with(b"\x89PNG\r\n\x1a\n") {
         return None;
     }
@@ -151,15 +132,6 @@ pub fn render(request: &Request) -> Result<Image, String> {
         },
     )
     .map_err(|_| "画像生成失敗")?;
-    let (width, height) = png_dimensions(&png).ok_or("画像生成失敗")?;
-    let columns = (width as usize).div_ceil(usize::from(request.cell.0));
-    let rows = (height as usize).div_ceil(usize::from(request.cell.1));
-    // セル境界へ余白を付け、部分矩形の転送でも縦横比とセル座標を一致させる。
-    let padded_width = columns as u32 * u32::from(request.cell.0);
-    let padded_height = rows as u32 * u32::from(request.cell.1);
-    if padded_width as usize * padded_height as usize * 4 > OUTPUT_LIMIT {
-        return Err("画像容量上限".into());
-    }
     let mut decoder = png::Decoder::new(io::Cursor::new(png));
     decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
     let mut reader = decoder.read_info().map_err(|_| "PNG読込失敗")?;
@@ -170,23 +142,40 @@ pub fn render(request: &Request) -> Result<Image, String> {
         png::ColorType::Rgb => 3,
         _ => return Err("PNG形式".into()),
     };
-    let mut padded = Vec::with_capacity(padded_width as usize * padded_height as usize * 4);
-    for y in 0..padded_height {
-        for x in 0..padded_width {
-            if x < width && y < height {
-                let at = (y as usize * width as usize + x as usize) * channels;
-                if request.monochrome {
-                    // 背景は透明なので、透明度だけを残して全体を文字色で描く。
-                    // `\color`で暗い色を指定した部分も、本文と同じ明るさで読める。
-                    padded.extend_from_slice(&request.foreground);
-                } else {
-                    padded.extend_from_slice(&raw[at..at + 3]);
-                }
-                padded.push(if channels == 4 { raw[at + 3] } else { 255 });
-            } else {
-                padded.extend_from_slice(&[0; 4]);
-            }
+    let mut rgba = Vec::with_capacity(info.width as usize * info.height as usize * 4);
+    for pixel in raw[..info.buffer_size()].chunks_exact(channels) {
+        if request.monochrome {
+            // 背景は透明なので、透明度だけを残して全体を文字色で描く。
+            // `\color`で暗い色を指定した部分も、本文と同じ明るさで読める。
+            rgba.extend_from_slice(&request.foreground);
+        } else {
+            rgba.extend_from_slice(&pixel[..3]);
         }
+        rgba.push(if channels == 4 { pixel[3] } else { 255 });
+    }
+    cell_image(&rgba, info.width, info.height, request.cell)
+}
+
+/// RGBAの画素をセル境界まで透明で埋め、PNGにする。数式とローカル画像で共通。
+/// 部分矩形の転送でも縦横比とセル座標を一致させるため。
+pub(crate) fn cell_image(
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+    cell: (u16, u16),
+) -> Result<Image, String> {
+    let columns = (width as usize).div_ceil(usize::from(cell.0));
+    let rows = (height as usize).div_ceil(usize::from(cell.1));
+    let padded_width = columns as u32 * u32::from(cell.0);
+    let padded_height = rows as u32 * u32::from(cell.1);
+    if padded_width as usize * padded_height as usize * 4 > OUTPUT_LIMIT {
+        return Err("画像容量上限".into());
+    }
+    let mut padded = vec![0; padded_width as usize * padded_height as usize * 4];
+    let row = width as usize * 4;
+    for y in 0..height as usize {
+        let at = y * padded_width as usize * 4;
+        padded[at..at + row].copy_from_slice(&rgba[y * row..(y + 1) * row]);
     }
     let mut output = Vec::new();
     {
@@ -206,506 +195,4 @@ pub fn render(request: &Request) -> Result<Image, String> {
         columns,
         rows,
     })
-}
-
-/// 非公開の子プロセス経路。TTYや外部レンダラーを必要としない。
-pub fn worker() -> u8 {
-    // メモリ使用量はワーカー単位でも制限する（親のTUIには影響しない）。
-    let limit = libc::rlimit {
-        rlim_cur: 512 * 1024 * 1024,
-        rlim_max: 512 * 1024 * 1024,
-    };
-    unsafe {
-        libc::setrlimit(libc::RLIMIT_DATA, &limit);
-    }
-    let result = (|| -> Result<(), String> {
-        let mut input = Vec::new();
-        io::stdin()
-            .take((MAX_TEX * 8) as u64)
-            .read_to_end(&mut input)
-            .map_err(|_| "入力失敗")?;
-        let request: Request = serde_json::from_slice(&input).map_err(|_| "入力形式")?;
-        let image = render(&request)?;
-        io::stdout()
-            .write_all(&image.png)
-            .map_err(|_| "出力失敗".into())
-    })();
-    if let Err(message) = result {
-        let _ = writeln!(io::stderr(), "{message}");
-        1
-    } else {
-        0
-    }
-}
-
-struct Job {
-    key: Request,
-    child: Child,
-    bytes: Vec<u8>,
-    start: Instant,
-}
-impl Job {
-    /// 出力を読み進める。終了・失敗・期限切れなら、その結果を返す。
-    fn poll(&mut self) -> Option<View> {
-        let mut failed = false;
-        if let Some(output) = &mut self.child.stdout {
-            let mut chunk = [0; 16384];
-            loop {
-                match output.read(&mut chunk) {
-                    Ok(0) => break,
-                    Ok(count) => {
-                        self.bytes.extend_from_slice(&chunk[..count]);
-                        if self.bytes.len() > OUTPUT_LIMIT {
-                            failed = true;
-                            break;
-                        }
-                    }
-                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
-                    Err(_) => {
-                        failed = true;
-                        break;
-                    }
-                }
-            }
-        }
-        let status = self.child.try_wait();
-        let expired = self.start.elapsed() >= JOB_TIMEOUT;
-        if !failed && !expired && matches!(status, Ok(None)) {
-            return None;
-        }
-        if matches!(status, Ok(Some(_)))
-            && let Some(output) = &mut self.child.stdout
-        {
-            let _ = output
-                .take(OUTPUT_LIMIT.saturating_sub(self.bytes.len()) as u64)
-                .read_to_end(&mut self.bytes);
-        }
-        Some(if expired {
-            View::Failed(format!("{}秒タイムアウト", JOB_TIMEOUT.as_secs()))
-        } else if matches!(status, Ok(Some(s)) if s.success())
-            && let Some((width, height)) = png_dimensions(&self.bytes)
-        {
-            View::Ready(Arc::new(Image {
-                columns: width as usize / usize::from(self.key.cell.0),
-                rows: height as usize / usize::from(self.key.cell.1),
-                width,
-                height,
-                png: std::mem::take(&mut self.bytes),
-            }))
-        } else {
-            View::Failed("構文・未対応コマンド・生成失敗".into())
-        })
-    }
-}
-impl Drop for Job {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-/// 実行中のワーカー。同時実行数を `MAX_JOBS` までに抑える。
-#[derive(Default)]
-struct Workers {
-    jobs: Vec<Job>,
-}
-impl Workers {
-    /// 終わったジョブを回収し、その要求と結果を返す。
-    fn collect(&mut self) -> Vec<(Request, View)> {
-        let mut done = Vec::new();
-        for i in (0..self.jobs.len()).rev() {
-            if let Some(view) = self.jobs[i].poll() {
-                let job = self.jobs.remove(i);
-                done.push((job.key.clone(), view));
-            }
-        }
-        done
-    }
-    fn is_running(&self, key: &Request) -> bool {
-        self.jobs.iter().any(|job| &job.key == key)
-    }
-    fn is_full(&self) -> bool {
-        self.jobs.len() >= MAX_JOBS
-    }
-    fn start(&mut self, key: Request) -> io::Result<()> {
-        self.jobs.push(start_job(key)?);
-        Ok(())
-    }
-    /// `keep` が偽の要求のジョブを止めて回収する。
-    fn retain(&mut self, mut keep: impl FnMut(&Request) -> bool) {
-        self.jobs.retain(|job| keep(&job.key));
-    }
-}
-
-struct Entry {
-    view: View,
-    used: u64,
-}
-
-/// 生成結果のLRUキャッシュ。件数と、PNGとデコード相当量の合計で古いものから捨てる。
-#[derive(Default)]
-struct Cache {
-    entries: HashMap<Request, Entry>,
-    clock: u64,
-    cost: usize,
-}
-impl Cache {
-    fn cost(view: &View) -> usize {
-        match view {
-            View::Ready(image) => image.cost(),
-            View::Failed(_) => 0,
-        }
-    }
-    fn get(&self, key: &Request) -> Option<&View> {
-        self.entries.get(key).map(|entry| &entry.view)
-    }
-    /// 結果があれば最近使ったものとして扱う。
-    fn touch(&mut self, key: &Request) -> bool {
-        let Some(entry) = self.entries.get_mut(key) else {
-            return false;
-        };
-        self.clock += 1;
-        entry.used = self.clock;
-        true
-    }
-    fn insert(&mut self, key: Request, view: View) {
-        self.clock += 1;
-        self.cost += Self::cost(&view);
-        let entry = Entry {
-            view,
-            used: self.clock,
-        };
-        if let Some(previous) = self.entries.insert(key, entry) {
-            self.cost -= Self::cost(&previous.view);
-        }
-        while self.entries.len() > CACHE_ENTRIES || self.cost > CACHE_LIMIT {
-            let Some(oldest) = self
-                .entries
-                .iter()
-                .min_by_key(|(_, entry)| entry.used)
-                .map(|(key, _)| key.clone())
-            else {
-                break;
-            };
-            if let Some(entry) = self.entries.remove(&oldest) {
-                self.cost -= Self::cost(&entry.view);
-            }
-        }
-    }
-}
-
-pub struct Manager {
-    /// `formulas` を作った文書の世代。
-    generation: u64,
-    /// ブロック数式のソース範囲と、現在の本文幅での生成要求。
-    formulas: Vec<(Range<usize>, Request)>,
-    width: Option<usize>,
-    workers: Workers,
-    cache: Cache,
-    /// 前回返した結果から変わり得るか。
-    changed: bool,
-    pub capabilities: Capabilities,
-}
-impl Manager {
-    pub fn new(document: &Document, generation: u64, capabilities: Capabilities) -> Self {
-        let mut manager = Self {
-            generation,
-            formulas: Vec::new(),
-            width: None,
-            workers: Workers::default(),
-            cache: Cache::default(),
-            changed: true,
-            capabilities,
-        };
-        manager.set_formulas(document);
-        manager
-    }
-    fn set_formulas(&mut self, document: &Document) {
-        let width = self.width.unwrap_or(0);
-        self.formulas = document
-            .display_math()
-            .map(|(node, tex)| (node.source.clone(), self.key(tex, width)))
-            .collect();
-    }
-    /// 差し替えた文書の数式へ切り替える（仕様3.1節）。新しい文書で使わない要求のジョブは止め、
-    /// 生成要求が同じ結果はキャッシュから再利用する。結果は `generation` の表示状態にだけ返す。
-    pub fn replace_document(&mut self, document: &Document, generation: u64) {
-        self.generation = generation;
-        self.set_formulas(document);
-        let formulas = &self.formulas;
-        self.workers
-            .retain(|key| formulas.iter().any(|(_, wanted)| wanted == key));
-        self.changed = true;
-    }
-    fn request_width(&self, width: usize) -> usize {
-        if self.capabilities.transport == Transport::Tmux {
-            width.min(PLACEHOLDER_COLUMNS)
-        } else {
-            width
-        }
-    }
-    fn key(&self, tex: &str, width: usize) -> Request {
-        Request {
-            tex: tex.into(),
-            width: self.request_width(width),
-            cell: self.capabilities.cell,
-            foreground: self.capabilities.foreground,
-            monochrome: self.capabilities.monochrome,
-        }
-    }
-    /// 本文幅が変わったら、各数式の要求を新しい幅へ合わせる。
-    fn set_width(&mut self, width: usize) {
-        if self.width == Some(width) {
-            return;
-        }
-        self.width = Some(width);
-        let width = self.request_width(width);
-        for (_, key) in &mut self.formulas {
-            key.width = width;
-        }
-        self.changed = true;
-    }
-    /// 画面と前後1画面にある数式の番号。画面内を上から、続いて画面に近い順に並べる。
-    fn wanted(&self, view: &ViewState) -> Vec<usize> {
-        if !view.body_visible {
-            return Vec::new();
-        }
-        let (top, rows, lines) = (view.top, view.rows, view.lines);
-        let range = top.saturating_sub(rows)..(top + rows * 2).min(lines.len());
-        let mut formulas: Vec<_> =
-            self.formulas
-                .iter()
-                .enumerate()
-                .filter_map(|(index, (source, _))| {
-                    if !lines[range.clone()].iter().any(|line| {
-                        line.source.start < source.end && source.start <= line.source.end
-                    }) {
-                        return None;
-                    }
-                    let row = anchored_row(lines, source.start);
-                    range.contains(&row).then(|| {
-                        (
-                            index,
-                            if row >= top && row < top + rows {
-                                (0, row - top)
-                            } else {
-                                (1, row.abs_diff(top))
-                            },
-                        )
-                    })
-                })
-                .collect();
-        formulas.sort_by_key(|(_, distance)| *distance);
-        formulas.into_iter().map(|(index, _)| index).collect()
-    }
-    /// 表示状態に合わせてジョブを進める。結果が変わり得るときだけ、数式ごとの結果を返す。
-    pub fn update(&mut self, view: &ViewState) -> Option<HashMap<usize, View>> {
-        // 数式の位置は文書ごとに違うため、別の世代の表示行へ結果を返さない。
-        if view.generation != self.generation {
-            return None;
-        }
-        self.set_width(view.width);
-        // 実行中ジョブは位置に関わらず最大2秒で終える。古い幅の結果はキャッシュだけへ。
-        for (key, view) in self.workers.collect() {
-            self.cache.insert(key, view);
-            self.changed = true;
-        }
-        for index in self.wanted(view) {
-            let key = &self.formulas[index].1;
-            if self.cache.touch(key) || self.workers.is_running(key) || self.workers.is_full() {
-                continue;
-            }
-            let key = key.clone();
-            let view = if key.tex.len() > MAX_TEX {
-                View::Failed("16 KiB上限".into())
-            } else {
-                match self.workers.start(key.clone()) {
-                    Ok(()) => continue,
-                    Err(_) => View::Failed("レンダラー起動失敗".into()),
-                }
-            };
-            self.cache.insert(key, view);
-            self.changed = true;
-        }
-        if !std::mem::take(&mut self.changed) {
-            return None;
-        }
-        Some(
-            self.formulas
-                .iter()
-                .filter_map(|(source, key)| {
-                    self.cache.get(key).map(|view| (source.start, view.clone()))
-                })
-                .collect(),
-        )
-    }
-    pub fn active_jobs(&self) -> usize {
-        self.workers.jobs.len()
-    }
-}
-/// ワーカーの出力を読むときに描画ループを止めないよう、パイプを非ブロッキングにする。
-fn set_nonblocking(pipe: &impl AsRawFd) -> io::Result<()> {
-    if unsafe { libc::fcntl(pipe.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) } < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
-}
-
-fn start_job(key: Request) -> io::Result<Job> {
-    let mut child = Command::new(std::env::current_exe()?)
-        .env("FUMI_INTERNAL_MATH_WORKER", "1")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()?;
-    // 16 KiBのTeXでもJSONエスケープ後はpipe容量を超え得るので送信は補助スレッド。
-    let mut input = child.stdin.take().unwrap();
-    let bytes = serde_json::to_vec(&key)?;
-    std::thread::spawn(move || {
-        let _ = input.write_all(&bytes);
-    });
-    if let Err(error) = set_nonblocking(child.stdout.as_ref().unwrap()) {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(error);
-    }
-    Ok(Job {
-        key,
-        child,
-        bytes: Vec::new(),
-        start: Instant::now(),
-    })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::app::App;
-    fn capabilities() -> Capabilities {
-        Capabilities {
-            transport: Transport::Direct,
-            cell: (10, 20),
-            foreground: [255; 3],
-            monochrome: false,
-        }
-    }
-    #[test]
-    fn cache_evicts_oldest_images_under_the_shared_budget() {
-        let document = Document::parse(String::new());
-        let mut manager = Manager::new(&document, 0, capabilities());
-        for i in 0..3 {
-            let key = manager.key(&format!("x_{i}"), 78);
-            manager.cache.insert(
-                key,
-                View::Ready(Arc::new(Image {
-                    png: vec![0],
-                    width: 8192,
-                    height: 2048,
-                    columns: 1,
-                    rows: 1,
-                })),
-            );
-        }
-        assert_eq!(manager.cache.entries.len(), 1);
-        assert_eq!(manager.cache.entries.keys().next().unwrap().tex, "x_2");
-        let total: usize = manager
-            .cache
-            .entries
-            .values()
-            .map(|entry| Cache::cost(&entry.view))
-            .sum();
-        assert_eq!(manager.cache.cost, total);
-        assert!(total <= CACHE_LIMIT);
-    }
-    #[test]
-    fn update_returns_results_only_when_they_may_have_changed() {
-        let mut app = App::new(Document::parse("$$ x $$".into()), "update.md", false);
-        app.resize(80, 24);
-        let mut manager = Manager::new(app.document(), app.generation(), capabilities());
-        // ワーカーを起動しないよう、使う幅の結果を先に入れておく。
-        for (width, reason) in [(78, "wide"), (58, "narrow")] {
-            let key = manager.key("x", width);
-            manager.cache.insert(key, View::Failed(reason.into()));
-        }
-        let failed = |views: Option<HashMap<usize, View>>| match views.unwrap().get(&0) {
-            Some(View::Failed(reason)) => reason.clone(),
-            _ => panic!("結果がない"),
-        };
-        assert_eq!(failed(manager.update(&app.view_state())), "wide");
-        assert!(manager.update(&app.view_state()).is_none());
-        app.resize(60, 24);
-        assert_eq!(failed(manager.update(&app.view_state())), "narrow");
-        assert!(manager.update(&app.view_state()).is_none());
-        assert_eq!(manager.active_jobs(), 0);
-    }
-    #[test]
-    fn replacing_the_document_stops_unused_jobs_and_ignores_other_generations() {
-        let mut app = App::new(Document::parse("$$ x $$".into()), "replace.md", false);
-        app.resize(80, 24);
-        let mut manager = Manager::new(app.document(), app.generation(), capabilities());
-        for tex in ["x", "y"] {
-            let key = manager.key(tex, 78);
-            manager.cache.insert(key, View::Failed(tex.into()));
-        }
-        assert!(manager.update(&app.view_state()).is_some());
-        let child = Command::new("/bin/sleep")
-            .arg("10")
-            .stdout(Stdio::piped())
-            .spawn()
-            .unwrap();
-        let pid = child.id();
-        manager.workers.jobs.push(Job {
-            key: manager.key("gone", 78),
-            child,
-            bytes: Vec::new(),
-            start: Instant::now(),
-        });
-        set_nonblocking(manager.workers.jobs[0].child.stdout.as_ref().unwrap()).unwrap();
-        app.replace_document(Document::parse("intro\n\n$$ x $$\n\n$$ y $$\n".into()));
-        // 差し替え前の数式の位置を、新しい文書の表示行へ返さない。
-        assert!(manager.update(&app.view_state()).is_none());
-        manager.replace_document(app.document(), app.generation());
-        assert_eq!(manager.active_jobs(), 0);
-        assert_eq!(unsafe { libc::kill(pid as i32, 0) }, -1);
-        let views = manager.update(&app.view_state()).unwrap();
-        let reasons: Vec<_> = app
-            .document()
-            .display_math()
-            .map(|(node, _)| match views.get(&node.source.start) {
-                Some(View::Failed(reason)) => reason.as_str(),
-                _ => panic!("キャッシュの結果がない"),
-            })
-            .collect();
-        assert_eq!(reasons, ["x", "y"]);
-    }
-    #[test]
-    fn timeout_kills_and_reaps_worker_without_waiting_for_completion() {
-        let mut app = App::new(Document::parse("$$ x $$".into()), "timeout.md", false);
-        app.resize(80, 24);
-        let mut manager = Manager::new(app.document(), app.generation(), capabilities());
-        let key = manager.key("x", 78);
-        let child = Command::new("/bin/sleep")
-            .arg("10")
-            .stdout(Stdio::piped())
-            .spawn()
-            .unwrap();
-        let pid = child.id();
-        manager.workers.jobs.push(Job {
-            key,
-            child,
-            bytes: Vec::new(),
-            start: Instant::now() - Duration::from_secs(3),
-        });
-        // 実際のジョブと同じ非ブロッキングstdoutを使用する。
-        set_nonblocking(manager.workers.jobs[0].child.stdout.as_ref().unwrap()).unwrap();
-        let start = Instant::now();
-        let views = manager.update(&app.view_state()).unwrap();
-        assert!(start.elapsed() < Duration::from_secs(1));
-        assert_eq!(manager.active_jobs(), 0);
-        assert!(
-            matches!(views.get(&0),Some(View::Failed(message)) if message.contains("タイムアウト"))
-        );
-        assert_eq!(unsafe { libc::kill(pid as i32, 0) }, -1);
-        assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
-    }
 }
