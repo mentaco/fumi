@@ -281,7 +281,7 @@ fn resize_keeps_source_and_small_mode_preserves_position() {
     app.resize(40, 12);
     assert_eq!(app.top(), top);
     let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
-    terminal.draw(|f| app.draw(f)).unwrap();
+    terminal.draw(|f| assert!(app.draw(f))).unwrap();
     assert!(
         terminal
             .backend()
@@ -290,6 +290,24 @@ fn resize_keeps_source_and_small_mode_preserves_position() {
             .iter()
             .any(|c| c.symbol() == "%")
     );
+}
+
+#[test]
+fn drawing_into_a_screen_resized_after_the_last_resize_is_skipped_without_panic() {
+    // 端末サイズを受け取った後、描画の直前にウィンドウが縮んだ・広がった場合。
+    let mut app = long_app();
+    app.resize(131, 49);
+    for (width, height) in [(131, 48), (130, 49), (131, 50), (10, 2)] {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|f| assert!(!app.draw(f))).unwrap();
+    }
+    app.resize(131, 48);
+    let mut terminal = Terminal::new(TestBackend::new(131, 48)).unwrap();
+    terminal.draw(|f| assert!(app.draw(f))).unwrap();
+    // サイズ不足の表示も、受け取ったサイズの画面にだけ描く。
+    app.resize(10, 2);
+    let mut terminal = Terminal::new(TestBackend::new(10, 2)).unwrap();
+    terminal.draw(|f| assert!(app.draw(f))).unwrap();
 }
 
 #[test]

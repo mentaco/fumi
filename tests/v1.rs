@@ -196,11 +196,11 @@ fn search_highlights_all_matches_without_color() {
     );
     app.resize(40, 8);
     let mut terminal = Terminal::new(TestBackend::new(40, 8)).unwrap();
-    terminal.draw(|f| app.draw(f)).unwrap();
+    terminal.draw(|f| assert!(app.draw(f))).unwrap();
     let original = terminal.backend().buffer().clone();
     let original_status = app.status();
     query(&mut app, "hello world");
-    terminal.draw(|f| app.draw(f)).unwrap();
+    terminal.draw(|f| assert!(app.draw(f))).unwrap();
     let cells = &terminal.backend().buffer().content;
     assert!(
         cells
@@ -213,7 +213,7 @@ fn search_highlights_all_matches_without_color() {
             .any(|c| c.modifier.contains(Modifier::UNDERLINED))
     );
     assert_eq!(key(&mut app, KeyCode::Esc), Action::None);
-    terminal.draw(|f| app.draw(f)).unwrap();
+    terminal.draw(|f| assert!(app.draw(f))).unwrap();
     assert_eq!(
         &terminal.backend().buffer().content[..40 * 7],
         &original.content[..40 * 7]
@@ -479,7 +479,7 @@ fn reference_destinations_have_independent_precise_highlights() {
     assert_eq!(app.search().matches.len(), 3);
     key(&mut app, KeyCode::Char('n'));
     let mut terminal = Terminal::new(TestBackend::new(120, 8)).unwrap();
-    terminal.draw(|frame| app.draw(frame)).unwrap();
+    terminal.draw(|frame| assert!(app.draw(frame))).unwrap();
     let selected: String = terminal.backend().buffer().content[..120]
         .iter()
         .filter(|cell| cell.modifier.contains(Modifier::REVERSED))

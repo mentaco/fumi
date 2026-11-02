@@ -262,6 +262,40 @@ def exit_path(key=None, sig=None, code=0):
         session.close()
 
 
+def resize_storm():
+    """ウィンドウを連続で縮める操作。描画の直前に端末が縮んでもpanicせず、落ち着いたら最終サイズで描く。"""
+    with tempfile.TemporaryDirectory() as directory:
+        document = Path(directory) / "storm.md"
+        paragraph = "長い文章を折り返して表示する。" * 8
+        document.write_text("".join(f"# 見出し{i}\n\n段落 {i} {paragraph}\n\n" for i in range(3000)), encoding="utf-8")
+        for _ in range(3):
+            session = Session([document], size=(131, 60))
+            try:
+                session.started()
+                until = time.monotonic() + 1.5
+                height = 60
+                while time.monotonic() < until:
+                    height = 60 if height <= 10 else height - 1
+                    session.resize(131 - (60 - height), height)
+                    try:
+                        os.kill(session.pid, signal.SIGWINCH)
+                    except ProcessLookupError:
+                        break
+                    session.pump(0.001)
+                since = len(session.data)
+                session.resize(70, 20)
+                session.pump(0.4)
+                assert b"panicked" not in session.data, session.visible()[-600:]
+                # 最終サイズで描き直し、ステータス行は20行目に置く。21行目以降へは書かない。
+                final = bytes(session.data[since:])
+                assert b"\x1b[20;1H" in final and "storm.md".encode() in final, final[-400:]
+                assert not re.search(rb"\x1b\[(?:2[1-9]|[3-9]\d)(?:;\d+)?H", final), final[-400:]
+                session.send(b"q")
+                session.wait(0)
+            finally:
+                session.close()
+
+
 def escape_keeps_viewer_open():
     session = Session(["--plain", FIXTURE])
     try:
@@ -391,6 +425,7 @@ def restoration_faults():
 if __name__ == "__main__":
     case("表示・操作・ヘルプ・リサイズ・読取専用・plain", interaction)
     case("Esc検索終了・閲覧継続・q終了の端末復旧", escape_keeps_viewer_open)
+    case("連続リサイズ中に描画直前に縮んでもpanicしない", resize_storm)
     case("ヘルプ表示中のq終了・端末復旧", lambda: exit_path(key=b"?q"))
     case("Ctrl+c終了", lambda: exit_path(key=b"\x03", code=130))
     case("SIGINT終了", lambda: exit_path(sig=signal.SIGINT, code=130))

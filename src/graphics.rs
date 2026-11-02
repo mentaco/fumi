@@ -680,7 +680,7 @@ mod tests {
         let draw = |terminal: &mut Terminal<TestBackend>, app: &App| {
             terminal
                 .draw(|f| {
-                    app.draw(f);
+                    assert!(app.draw(f));
                     kitty.render_placeholders(&app.view_state(), f);
                 })
                 .unwrap()

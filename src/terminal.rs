@@ -178,7 +178,10 @@ pub fn run(
     app.resize(size.width, size.height);
     crate::profile::mark("layout_ms");
     // 端末の画像対応の確認の待ち時間で初回表示を遅らせないよう、確認前に本文をテキストで描く。
-    terminal.draw(|f| app.draw(f))?;
+    // 描けなかった場合も、ループの最初の描画で描き直す。
+    terminal.draw(|f| {
+        app.draw(f);
+    })?;
     crate::profile::finish()?;
     let mut decoder = Decoder::default();
     let mut kitty = Kitty::default();
@@ -232,22 +235,29 @@ pub fn run(
         if dirty && last_draw.elapsed() >= FRAME {
             kitty.clear_placements(terminal.backend_mut())?;
             let prepared = kitty.prepare(&app.view_state(), terminal.backend_mut());
+            // 描画の直前に端末サイズが変わると描けない。次の周回でサイズを合わせて描き直す。
+            let mut drawn = false;
             if prepared.is_ok() {
                 terminal.draw(|f| {
-                    app.draw(f);
-                    kitty.render_placeholders(&app.view_state(), f);
+                    drawn = app.draw(f);
+                    if drawn {
+                        kitty.render_placeholders(&app.view_state(), f);
+                    }
                 })?;
             }
-            if prepared
-                .and_then(|()| kitty.draw(&app.view_state(), terminal.backend_mut()))
-                .is_err()
-            {
+            let placed = match prepared {
+                Ok(()) if drawn => kitty.draw(&app.view_state(), terminal.backend_mut()),
+                result => result,
+            };
+            if placed.is_err() {
                 disable_graphics(&mut app, &mut kitty, &mut math);
-                terminal.draw(|f| app.draw(f))?;
+                terminal.draw(|f| {
+                    drawn = app.draw(f);
+                })?;
             }
             crate::profile::finish()?;
             last_draw = Instant::now();
-            dirty = false;
+            dirty = !drawn;
         }
         crate::input::read(&mut decoder, FRAME)?;
         while let Some(event) = decoder.events.pop_front() {

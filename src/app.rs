@@ -799,8 +799,14 @@ impl App {
         truncate_middle(&percentage, width)
     }
 
-    pub fn draw(&self, frame: &mut Frame) {
+    /// 画面を描く。描画の直前に端末サイズが変わり、`resize` で受け取ったサイズと画面が
+    /// 違う場合は何も描かずに偽を返す。古いサイズの位置へ書くと画面の外を指すため。
+    /// 呼び出し側は次の周回でサイズを合わせ直してから描き直す。
+    pub fn draw(&self, frame: &mut Frame) -> bool {
         let area = frame.area();
+        if (area.width, area.height) != (self.width, self.height) {
+            return false;
+        }
         if self.too_small() {
             frame.render_widget(
                 Paragraph::new(truncate_middle(
@@ -809,7 +815,7 @@ impl App {
                 )),
                 Rect::new(0, 0, area.width, area.height.min(1)),
             );
-            return;
+            return true;
         }
         let body = Rect::new(
             self.left_margin(),
@@ -836,6 +842,7 @@ impl App {
             Paragraph::new(self.status()).style(Style::default().add_modifier(Modifier::REVERSED)),
             Rect::new(0, self.height - 1, self.width, 1),
         );
+        true
     }
 }
 
