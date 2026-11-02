@@ -22,8 +22,10 @@ use std::{
 mod diacritics;
 pub const PLACEHOLDER_COLUMNS: usize = diacritics::DIACRITICS.len();
 const QUERY_ID: u32 = 4_000_000_001;
-/// 端末の画像対応の確認で応答を待つ上限。tmuxの自動設定もこの時間に含める。
+/// 端末の画像対応の確認で応答を待つ上限。照会を送る直前から数える。
 const QUERY_TIMEOUT: Duration = Duration::from_millis(150);
+/// tmuxのパススルー自動設定の待ち時間の上限。照会の応答待ち（`QUERY_TIMEOUT`）とは別に数える。
+const TMUX_SETUP_TIMEOUT: Duration = Duration::from_millis(150);
 static OWNED: Mutex<Vec<(u32, Transport)>> = Mutex::new(Vec::new());
 static NEXT_ID: OnceLock<AtomicU32> = OnceLock::new();
 
@@ -135,19 +137,19 @@ pub fn query(
     }
     let transport = Transport::detect();
     let mut output = io::stdout();
-    let start = Instant::now();
     // tmuxは外側のAPC応答をアクティブなペインへ配送する。非アクティブな
     // ペインのリサイズでは確認済みの対応状態を再利用し、寸法と色だけ更新する。
     let reused =
         transport == Transport::Tmux && previous.is_some_and(|c| c.transport == Transport::Tmux);
-    if transport == Transport::Tmux && !reused {
-        if let Err(reason) = enable_tmux_passthrough(start + QUERY_TIMEOUT) {
-            return Ok(Err(reason.into()));
-        }
-        if start.elapsed() >= QUERY_TIMEOUT {
-            return Ok(Err("tmux自動設定タイムアウト".into()));
-        }
+    // 自動設定と応答待ちの上限を分ける。コマンドの起動が遅い環境でも、
+    // 応答待ちの時間を自動設定に使い切らないようにするため（仕様8.1節）。
+    if transport == Transport::Tmux
+        && !reused
+        && let Err(reason) = enable_tmux_passthrough(Instant::now() + TMUX_SETUP_TIMEOUT)
+    {
+        return Ok(Err(reason.into()));
     }
+    let start = Instant::now();
     let probe_id = (transport == Transport::Tmux && !reused).then(next_id);
     send_probes(&mut output, transport, !reused, probe_id)?;
     let mut replies = Replies {

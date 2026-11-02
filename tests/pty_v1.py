@@ -28,11 +28,14 @@ def unwrapped(data):
     return PASSTHROUGH.sub(lambda m: m[1].replace(b"\x1b\x1b", b"\x1b"), data)
 
 
-def respond(session, cell=(10, 20), background=True, foreground=True, malformed=False, supported=True, placeholders=True):
+def respond(session, cell=(10, 20), background=True, foreground=True, malformed=False, supported=True, placeholders=True, delay=0):
     until = time.monotonic() + 5
     while b"a=q" not in session.data:
         session.pump(.01)
         assert time.monotonic() < until, "query timeout"
+    if delay:
+        # 照会を受けてから応答するまでの端末側の遅れ。
+        session.pump(delay)
     replies = b"\x1b_Gi=4000000001;OK\x1b\\" if supported else b""
     session.pump(.005)
     for fields, _ in commands(session):
@@ -185,6 +188,19 @@ def tmux_color_never():
         session.close()
 
 
+def slow_setup_keeps_reply_budget():
+    # 自動設定と応答にそれぞれ60 ms以上かかっても、各上限（150 ms）に収まれば画像表示になる。
+    # 遅い環境での揺れに耐えるよう、各段階の余裕は大きく取る。
+    # コマンドの起動と応答の受け渡しを含む合計は150 msに近づき、一つの上限で数えると足りなくなり得る。
+    session = Session([V1], extra_env=mock_tmux_env({"TMUX": "test", "FUMI_TEST_TMUX_MODE": "slow"}))
+    try:
+        started_kitty(session, delay=.06)
+        session.send(b"q")
+        session.wait(0)
+    finally:
+        session.close()
+
+
 def setup_failure(mode):
     start = time.monotonic()
     fallback([], {"TMUX": "test", "FUMI_TEST_TMUX_MODE": mode})
@@ -260,6 +276,7 @@ def run():
     case("tmux off", lambda: fallback(["--graphics", "off"], {"TMUX": "test"}))
     case("tmux仮想配置失敗のテキスト復帰", lambda: transfer_failure(tmux=True))
     case("tmux自動設定失敗", lambda: setup_failure("fail"))
+    case("tmux自動設定が遅くても応答待ちの時間を残す", slow_setup_keeps_reply_budget)
     case("tmux自動設定タイムアウト・子プロセス回収", lambda: setup_failure("hang"))
     case("tmuxペインID不正", lambda: fallback([], {"TMUX": "test", "TMUX_PANE": "other:0"}))
     case("tmuxコマンド未導入", lambda: fallback([], {"TMUX": "test", "PATH": "/nonexistent-fumi-test"}))
@@ -281,6 +298,7 @@ printf '%s\n' "$*" >> "$FUMI_TEST_TMUX_LOG"
 printf '%s\n' "$$" > "$FUMI_TEST_TMUX_LOG.pid"
 case "$FUMI_TEST_TMUX_MODE" in
     fail) exit 1 ;;
+    slow) /bin/sleep 0.06 ;;
     hang) exec /bin/sleep 10 ;;
 esac
 exit 0
