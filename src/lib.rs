@@ -7,6 +7,7 @@ pub mod input;
 pub mod layout;
 pub mod math;
 pub mod profile;
+pub mod reload;
 pub mod search;
 pub mod source;
 pub mod terminal;

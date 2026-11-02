@@ -31,7 +31,7 @@ const WHEEL_LINES: usize = 3;
 /// ヘルプの本文。操作の数値は定数から埋め込み、実装との食い違いを防ぐ。
 fn help_text() -> String {
     format!(
-        "# fumi 操作一覧\n\n読み取り専用Markdownビューア（v1）\n\nj / ↓ : 1表示行下\nk / ↑ : 1表示行上\nCtrl+d / Ctrl+u : 半画面下 / 上\nCtrl+f / PageDown : 1画面下（1行重複）\nCtrl+b / PageUp : 1画面上（1行重複）\ngg / Home : 先頭\nG / End : 末尾\n? : ヘルプを開閉\nq : ツールを終了（ヘルプ表示中も同じ）\nEsc : 検索語・ハイライトを解除、ヘルプから本文へ戻る\n/ : 検索入力（最大{SEARCH_LIMIT}書記素）\nn / N : 次 / 前の一致（循環）\nホイール : {WHEEL_LINES}表示行上下\n検索中 Enter : 確定、Esc / Ctrl+c : 取消\n検索中 Backspace : 1書記素削除、Ctrl+u : 全消去\nCtrl+c : 割り込み終了（130）\nCtrl+z : 中断、fgで復帰\n\nヘルプでも移動できます。本文位置は変わりません。\nサイズ不足中はq / Ctrl+cで終了できます。\n\nfumi - : パイプ・リダイレクトの標準入力を表示\n--plain : 端末の画像対応の確認や画像を使わないテキストTUI\n--color auto|always|never : 色の指定\n--graphics auto|off|kitty : 数式画像の方式\n\n対応端末のブロック数式は画像、それ以外はTeXソースを表示します。\nMarkdown画像は代替テキストと参照先を表示します。\nリンクを開く操作はありません。"
+        "# fumi 操作一覧\n\n読み取り専用Markdownビューア（v1）\n\nj / ↓ : 1表示行下\nk / ↑ : 1表示行上\nCtrl+d / Ctrl+u : 半画面下 / 上\nCtrl+f / PageDown : 1画面下（1行重複）\nCtrl+b / PageUp : 1画面上（1行重複）\ngg / Home : 先頭\nG / End : 末尾\n? : ヘルプを開閉\nR : 文書を再読込（ファイル入力のみ）\nq : ツールを終了（ヘルプ表示中も同じ）\nEsc : 検索語・ハイライトを解除、ヘルプから本文へ戻る\n/ : 検索入力（最大{SEARCH_LIMIT}書記素）\nn / N : 次 / 前の一致（循環）\nホイール : {WHEEL_LINES}表示行上下\n検索中 Enter : 確定、Esc / Ctrl+c : 取消\n検索中 Backspace : 1書記素削除、Ctrl+u : 全消去\nCtrl+c : 割り込み終了（130）\nCtrl+z : 中断、fgで復帰\n\nヘルプでも移動できます。本文位置は変わりません。\nサイズ不足中はq / Ctrl+cで終了できます。\n\nfumi - : パイプ・リダイレクトの標準入力を表示\n--plain : 端末の画像対応の確認や画像を使わないテキストTUI\n--color auto|always|never : 色の指定\n--graphics auto|off|kitty : 数式画像の方式\n\n対応端末のブロック数式は画像、それ以外はTeXソースを表示します。\nMarkdown画像は代替テキストと参照先を表示します。\nリンクを開く操作はありません。"
     )
 }
 
@@ -40,6 +40,8 @@ pub enum Action {
     None,
     Exit(u8),
     Suspend,
+    /// 文書の再読込（仕様3.1節）。読込は端末ループが行う。
+    Reload,
 }
 
 /// 本文とヘルプで共通のスクロール操作。
@@ -123,6 +125,8 @@ pub struct App {
     math_status: Status,
     graphics_active: bool,
     warning: String,
+    /// 次のキー操作まで表示するお知らせ。再読込の結果等。
+    notice: String,
     help_visible: bool,
     help: Pane,
     layout_width: usize,
@@ -142,6 +146,7 @@ impl App {
             math_status: Default::default(),
             graphics_active: false,
             warning: String::new(),
+            notice: String::new(),
             help_visible: false,
             help: Pane::new(Document::parse(help_text())),
             layout_width: 0,
@@ -170,6 +175,10 @@ impl App {
     }
     pub fn search(&self) -> &Search {
         &self.search
+    }
+    /// 次のキー操作までステータスに出すお知らせを設定する。
+    pub fn set_notice(&mut self, notice: &str) {
+        self.notice = sanitize(notice);
     }
     pub fn help_visible(&self) -> bool {
         self.help_visible
@@ -327,6 +336,7 @@ impl App {
         if key.kind == KeyEventKind::Release {
             return Action::None;
         }
+        self.notice.clear();
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         if ctrl && key.code == KeyCode::Char('c') {
             if self.search.input.take().is_some() {
@@ -424,6 +434,7 @@ impl App {
                     self.search.limited = false;
                     return Action::None;
                 }
+                KeyCode::Char('R') if !self.help_visible => return Action::Reload,
                 KeyCode::Char('n' | 'N') if !self.help_visible => {
                     self.next_match(code == KeyCode::Char('N'));
                     return Action::None;
@@ -749,8 +760,13 @@ impl App {
         } else {
             String::new()
         };
+        let notice = if self.help_visible || self.notice.is_empty() {
+            String::new()
+        } else {
+            format!(" {}", self.notice)
+        };
         let extras = format!(
-            "{search_status}{base_extras}{}",
+            "{search_status}{notice}{base_extras}{}",
             if self.warning.is_empty() {
                 String::new()
             } else {
@@ -762,8 +778,11 @@ impl App {
         } else {
             "TEXT"
         };
+        // 再読込の結果等のお知らせは、検索の状態と同じく補足情報の中で最後まで残す。
         for suffix in [
             format!(" {mode} {percentage}{extras}"),
+            format!(" {mode} {percentage}{search_status}{notice}"),
+            format!(" {percentage}{search_status}{notice}"),
             format!(" {mode} {percentage}{search_status}"),
             format!(" {percentage}{search_status}"),
             format!(" {mode} {percentage}"),

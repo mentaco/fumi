@@ -4,6 +4,7 @@ use crate::{
     graphics::{Capabilities, Kitty},
     input::{Decoder, InputEvent},
     math::{Manager, Status},
+    reload::{self, Reloader},
 };
 use crossterm::{
     cursor::{Hide, Show},
@@ -159,7 +160,13 @@ pub struct GraphicsOptions {
     pub colors: bool,
 }
 
-pub fn run(mut app: App, signals: &Signals, options: GraphicsOptions) -> io::Result<u8> {
+/// `reloader` はファイル入力のときだけ渡す。標準入力は読み直せない（仕様2.4節）。
+pub fn run(
+    mut app: App,
+    signals: &Signals,
+    options: GraphicsOptions,
+    mut reloader: Option<Reloader>,
+) -> io::Result<u8> {
     install_panic_hook();
     if let Some(code) = signals.exit_code() {
         return Ok(code);
@@ -176,6 +183,8 @@ pub fn run(mut app: App, signals: &Signals, options: GraphicsOptions) -> io::Res
     let mut decoder = Decoder::default();
     let mut kitty = Kitty::default();
     let mut math = configure_graphics(&mut app, options, &mut decoder, None)?;
+    // 画像表示の可否を決めたか。数式のない文書では決めず、再読込で数式が現れたときに確かめる。
+    let mut graphics_decided = app.document().has_display_math();
     let mut dirty = true;
     let mut last_draw = Instant::now() - Duration::from_secs(1);
     loop {
@@ -192,6 +201,23 @@ pub fn run(mut app: App, signals: &Signals, options: GraphicsOptions) -> io::Res
                     let previous = math.as_ref().map(|m| m.capabilities);
                     math = configure_graphics(&mut app, options, &mut decoder, previous)?;
                 }
+            }
+            dirty = true;
+        }
+        if let Some(result) = reloader.as_mut().and_then(Reloader::poll) {
+            match result {
+                Ok(document) => {
+                    app.replace_document(document);
+                    if let Some(manager) = &mut math {
+                        manager.replace_document(app.document(), app.generation());
+                    } else if !graphics_decided && app.document().has_display_math() {
+                        math = configure_graphics(&mut app, options, &mut decoder, None)?;
+                        graphics_decided = true;
+                    }
+                    app.set_notice("再読込");
+                }
+                // 旧表示を維持する（仕様3.1節）。
+                Err(e) => app.set_notice(&format!("再読込失敗: {}", reload::reason(&e))),
             }
             dirty = true;
         }
@@ -227,6 +253,13 @@ pub fn run(mut app: App, signals: &Signals, options: GraphicsOptions) -> io::Res
                     match app.key(key) {
                         Action::Exit(code) => return Ok(code),
                         Action::Suspend => suspend = true,
+                        Action::Reload => match &mut reloader {
+                            Some(reloader) => {
+                                reloader.request();
+                                app.set_notice("再読込中");
+                            }
+                            None => app.set_notice("stdinは再読込できません"),
+                        },
                         Action::None => {}
                     }
                     dirty = true;
@@ -259,6 +292,7 @@ pub fn run(mut app: App, signals: &Signals, options: GraphicsOptions) -> io::Res
             let size = terminal::size()?;
             app.resize(size.0, size.1);
             math = configure_graphics(&mut app, options, &mut decoder, None)?;
+            graphics_decided = app.document().has_display_math();
             terminal.clear()?;
             dirty = true;
         }
@@ -278,7 +312,7 @@ fn configure_graphics(
     decoder: &mut Decoder,
     previous: Option<Capabilities>,
 ) -> io::Result<Option<Manager>> {
-    // 文書は起動中に変わらないため、画像化する数式がなければ画像表示の状態も変わらない。
+    // 画像化する数式がなければ、端末の画像対応を確かめない。再読込で数式が現れたら呼び直す。
     if !app.document().has_display_math() {
         return Ok(None);
     }

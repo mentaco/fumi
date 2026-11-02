@@ -4,6 +4,7 @@ use fumi::{
     cli::Cli,
     document::Document,
     profile,
+    reload::Reloader,
     source::{STDIN_NAME, load, load_stdin, sanitize},
     terminal::{GraphicsOptions, Signals, open_tty, replace_stdin, run},
 };
@@ -133,7 +134,8 @@ fn main() -> ExitCode {
         plain: cli.plain,
         colors,
     };
-    match run(app, &signals, options) {
+    let reloader = (!stdin_input).then(|| Reloader::new(cli.file.clone()));
+    match run(app, &signals, options, reloader) {
         Ok(code) => ExitCode::from(code),
         Err(e) => error("端末", &e.to_string(), 1),
     }

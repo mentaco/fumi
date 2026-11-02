@@ -1,8 +1,9 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use fumi::{
-    app::App,
+    app::{Action, App},
     document::Document,
     math::{self, Request, Status, View},
+    reload::{Reloader, reason},
     source::{MAX_BYTES, decode, read_stream},
 };
 use std::{
@@ -15,8 +16,19 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-fn key(app: &mut App, code: KeyCode) {
-    app.key(KeyEvent::new(code, KeyModifiers::NONE));
+fn key(app: &mut App, code: KeyCode) -> Action {
+    app.key(KeyEvent::new(code, KeyModifiers::NONE))
+}
+/// 再読込の結果が届くまで待つ。
+fn reloaded(reloader: &mut Reloader) -> std::io::Result<Document> {
+    let until = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(result) = reloader.poll() {
+            return result;
+        }
+        assert!(Instant::now() < until, "再読込の待ちタイムアウト");
+        thread::sleep(Duration::from_millis(5));
+    }
 }
 fn app(source: &str) -> App {
     let mut app = App::new(Document::parse(source.into()), "v2.md", false);
@@ -223,4 +235,121 @@ fn replacing_keeps_help_open_and_leaves_its_position_alone() {
     assert_eq!(app.status(), status);
     key(&mut app, KeyCode::Esc);
     assert_eq!(top_text(&app), "q0");
+}
+
+#[test]
+fn capital_r_requests_a_reload_only_in_normal_viewing() {
+    let mut app = app(&paragraphs("p", 30));
+    assert_eq!(key(&mut app, KeyCode::Char('R')), Action::Reload);
+    assert_eq!(key(&mut app, KeyCode::Char('r')), Action::None);
+    key(&mut app, KeyCode::Char('?'));
+    assert_eq!(key(&mut app, KeyCode::Char('R')), Action::None);
+    assert!(app.help_visible());
+    key(&mut app, KeyCode::Esc);
+    key(&mut app, KeyCode::Char('/'));
+    assert_eq!(key(&mut app, KeyCode::Char('R')), Action::None);
+    assert_eq!(app.search().input.as_deref(), Some("R"));
+    key(&mut app, KeyCode::Esc);
+    key(&mut app, KeyCode::Char('g'));
+    assert_eq!(key(&mut app, KeyCode::Char('R')), Action::Reload);
+    assert!(!app.pending_g());
+    app.resize(10, 2);
+    assert_eq!(key(&mut app, KeyCode::Char('R')), Action::None);
+}
+
+#[test]
+fn notice_lasts_until_the_next_key_and_is_sanitized() {
+    let mut app = app("body");
+    app.resize(80, 8);
+    app.set_notice("再読込失敗: \u{1b}]52;x\u{7}");
+    let status = app.status();
+    assert!(status.contains("再読込失敗: ␛]52;x\\u{0007}"), "{status}");
+    assert!(!status.contains('\u{1b}'));
+    key(&mut app, KeyCode::Char('?'));
+    assert!(!app.status().contains("再読込"));
+    key(&mut app, KeyCode::Esc);
+    app.set_notice("再読込");
+    // ヘルプ表示中は本文のお知らせを出さない。
+    key(&mut app, KeyCode::Char('?'));
+    app.set_notice("再読込");
+    assert!(!app.status().contains("再読込"));
+    key(&mut app, KeyCode::Esc);
+    app.set_notice("再読込");
+    assert!(app.status().contains("再読込"));
+    // 狭い画面では、ヘルプの案内より先にお知らせを残す。
+    app.resize(30, 8);
+    assert!(
+        app.status().contains("TEXT 100% 再読込"),
+        "{}",
+        app.status()
+    );
+    key(&mut app, KeyCode::Char('j'));
+    assert!(!app.status().contains("再読込"));
+}
+
+#[test]
+fn reloader_reads_the_path_again_and_reports_failures() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("doc.md");
+    std::fs::write(&path, "first\r\n").unwrap();
+    let mut reloader = Reloader::new(path.clone());
+    assert!(reloader.poll().is_none());
+    reloader.request();
+    assert!(reloader.is_loading());
+    assert_eq!(reloaded(&mut reloader).unwrap().source, "first\n");
+    assert!(!reloader.is_loading());
+    std::fs::remove_file(&path).unwrap();
+    reloader.request();
+    assert_eq!(
+        reason(&reloaded(&mut reloader).unwrap_err()),
+        "ファイルが見つかりません"
+    );
+    std::fs::write(&path, b"\xff").unwrap();
+    reloader.request();
+    assert_eq!(
+        reason(&reloaded(&mut reloader).unwrap_err()),
+        "UTF-8が不正です"
+    );
+    // 削除後に同じパスへ戻ったファイルも読める。
+    std::fs::write(&path, "back").unwrap();
+    reloader.request();
+    assert_eq!(reloaded(&mut reloader).unwrap().source, "back");
+}
+
+#[test]
+fn reload_requested_while_loading_reads_again_after_the_first_load() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("doc.md");
+    std::fs::write(&path, "old").unwrap();
+    let mut reloader = Reloader::new(path.clone());
+    reloader.request();
+    std::fs::write(&path, "new").unwrap();
+    // 1回目の読込が古い内容を読んでいても、その結果は捨てて読み直す。
+    reloader.request();
+    assert_eq!(reloaded(&mut reloader).unwrap().source, "new");
+    assert!(!reloader.is_loading());
+}
+
+#[test]
+fn reloader_resolves_symlinks_and_atomic_replacements_each_time() {
+    let directory = tempfile::tempdir().unwrap();
+    let first = directory.path().join("first.md");
+    let second = directory.path().join("second.md");
+    let link = directory.path().join("link.md");
+    std::fs::write(&first, "first").unwrap();
+    std::fs::write(&second, "second").unwrap();
+    std::os::unix::fs::symlink(&first, &link).unwrap();
+    let mut reloader = Reloader::new(link.clone());
+    reloader.request();
+    assert_eq!(reloaded(&mut reloader).unwrap().source, "first");
+    std::fs::remove_file(&link).unwrap();
+    std::os::unix::fs::symlink(&second, &link).unwrap();
+    reloader.request();
+    assert_eq!(reloaded(&mut reloader).unwrap().source, "second");
+    let temporary = directory.path().join(".second.md.tmp");
+    std::fs::write(&temporary, "saved").unwrap();
+    std::fs::rename(&temporary, &second).unwrap();
+    reloader.request();
+    assert_eq!(reloaded(&mut reloader).unwrap().source, "saved");
+    assert_eq!(std::fs::read_to_string(&first).unwrap(), "first");
 }
