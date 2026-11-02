@@ -284,12 +284,24 @@ def resize_storm():
                     session.pump(0.001)
                 since = len(session.data)
                 session.resize(70, 20)
-                session.pump(0.4)
-                assert b"panicked" not in session.data, session.visible()[-600:]
                 # 最終サイズで描き直し、ステータス行は20行目に置く。21行目以降へは書かない。
-                final = bytes(session.data[since:])
-                assert b"\x1b[20;1H" in final and "storm.md".encode() in final, final[-400:]
-                assert not re.search(rb"\x1b\[(?:2[1-9]|[3-9]\d)(?:;\d+)?H", final), final[-400:]
+                # 大きな文書の組み直しはdebugビルドで数百msかかり、CIではさらに遅いため、
+                # 決まった時間ではなく描き直されるまで待つ。
+                # 古いサイズで描きかけたフレームの出力が後から届くことがあるため、
+                # 最終サイズへ変わったときの画面消去より後だけを確かめる。
+
+                def final_frames():
+                    data = bytes(session.data[since:])
+                    return data[data.rfind(b"\x1b[2J"):] if b"\x1b[2J" in data else b""
+
+                until = time.monotonic() + 15
+                while not (b"\x1b[20;1H" in final_frames() and "storm.md".encode() in final_frames()):
+                    assert b"panicked" not in session.data, session.visible()[-600:]
+                    assert time.monotonic() < until, bytes(session.data[since:])[-400:]
+                    session.pump(0.05)
+                session.pump(0.1)
+                assert b"panicked" not in session.data, session.visible()[-600:]
+                assert not re.search(rb"\x1b\[(?:2[1-9]|[3-9]\d)(?:;\d+)?H", final_frames()), final_frames()[-400:]
                 session.send(b"q")
                 session.wait(0)
             finally:
