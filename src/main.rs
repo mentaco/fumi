@@ -4,7 +4,7 @@ use fumi::{
     cli::Cli,
     document::Document,
     profile,
-    reload::Reloader,
+    reload::{self, Reloader},
     source::{STDIN_NAME, load, load_stdin, sanitize},
     terminal::{GraphicsOptions, Signals, open_tty, replace_stdin, run},
 };
@@ -49,6 +49,9 @@ fn main() -> ExitCode {
     };
     // `-` は標準入力。実ファイル名が `-` の場合は `./-` を指定する（仕様2.1・2.4節）。
     let stdin_input = cli.file.as_os_str() == "-";
+    if stdin_input && cli.watch {
+        return error("引数", "--watch はファイル入力でのみ使えます", 2);
+    }
     let tty = if stdin_input {
         if !io::stdout().is_terminal() {
             return error("端末", "stdoutにTTYが必要です", 1);
@@ -88,6 +91,8 @@ fn main() -> ExitCode {
     } else {
         cli.file.to_string_lossy()
     };
+    // 自動再読込の基準は読む直前の状態。読んでいる間の変更は最初の確認で見つかる。
+    let read = cli.watch.then(|| reload::stamp(&cli.file));
     let loaded = if stdin_input {
         load_stdin(|| signals.exit_code().is_some())
     } else {
@@ -134,7 +139,14 @@ fn main() -> ExitCode {
         plain: cli.plain,
         colors,
     };
-    let reloader = (!stdin_input).then(|| Reloader::new(cli.file.clone()));
+    let reloader = match read {
+        Some(read) => Some(Reloader::watching(
+            cli.file.clone(),
+            read,
+            std::time::Instant::now(),
+        )),
+        None => (!stdin_input).then(|| Reloader::new(cli.file.clone())),
+    };
     match run(app, &signals, options, reloader) {
         Ok(code) => ExitCode::from(code),
         Err(e) => error("端末", &e.to_string(), 1),

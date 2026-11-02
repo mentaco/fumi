@@ -23,7 +23,9 @@ fn syntax_errors_precede_tty_checks() {
     for args in [
         vec![],
         vec!["a", "b"],
-        vec!["--watch", "a"],
+        // 監視はファイル入力だけ。TTYの確認より先に使用法エラーにする（仕様2.4節）。
+        vec!["--watch", "-"],
+        vec!["-", "--watch"],
         vec!["--graphics", "unknown", "a"],
         vec!["--color", "wrong", "a"],
         vec!["-", "a"],
@@ -47,6 +49,7 @@ fn redirected_output_has_no_terminal_controls() {
         vec!["-"],
         vec!["--plain", "-"],
         vec!["--", "-"],
+        vec!["--watch", "missing.md"],
     ] {
         let output = run(&args);
         assert_eq!(output.status.code(), Some(1));

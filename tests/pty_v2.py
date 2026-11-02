@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""v2の標準入力（`fumi -`）と手動再読込（`R`）をPTYで検証する。標準入力のキー入力は制御端末（/dev/tty）から送る。"""
+"""v2の標準入力（`fumi -`）と再読込（`R`・`--watch`）をPTYで検証する。標準入力のキー入力は制御端末（/dev/tty）から送る。"""
 import os
 from pathlib import Path
 import signal
@@ -227,6 +227,38 @@ def reload_replaces_math_images():
             session.close()
 
 
+def watch_reload():
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "doc.md"
+        path.write_text("# 初版\n", encoding="utf-8")
+        session = Session(["--watch", path])
+        try:
+            session.started()
+            # 変化がなければ読み直さない。
+            session.pump(0.6)
+            assert "再読込" not in status(session), status(session)
+            path.write_text("# 第二版\n", encoding="utf-8")
+            # キーを押さずに、200 ms間隔の確認2回（変化の発見と安定の確認）の後に読み直す。
+            wait_screen(session, "第二版", seconds=3)
+            assert "再読込" in status(session), status(session)
+            session.send(b"j")
+            assert "再読込" not in status(session), status(session)
+            path.unlink()
+            wait_screen(session, "再読込失敗: ファイルが見つかりません", seconds=3)
+            assert any("第二版" in row for row in session.screen())
+            # 削除後に同じパスへ戻ったファイル（atomic save）も変化として読む。
+            temporary = Path(directory) / ".doc.md.tmp"
+            temporary.write_text("# 第三版\n", encoding="utf-8")
+            os.replace(temporary, path)
+            wait_screen(session, "第三版", seconds=3)
+            before = path.read_bytes()
+            session.send(b"q")
+            session.wait(0)
+            assert path.read_bytes() == before
+        finally:
+            session.close()
+
+
 def startup_errors():
     session = Session(["-"])
     try:
@@ -234,6 +266,15 @@ def startup_errors():
         assert_not_started(session)
         assert "パイプかリダイレクト" in session.visible()
     finally:
+        session.close()
+    # 標準入力の監視は、読込の前に使用法エラーにする。
+    session, thread, _ = piped(DOCUMENT, args=("--watch", "-"))
+    try:
+        session.wait(2)
+        assert_not_started(session)
+        assert "--watch はファイル入力でのみ使えます" in session.visible()
+    finally:
+        thread.join()
         session.close()
     cases = [
         ({"stdout_tty": False}, DOCUMENT, None),
@@ -294,9 +335,10 @@ if __name__ == "__main__":
     case("リダイレクト・空の入力・入力を変更しない", redirect_and_empty)
     case("Ctrl+z / SIGCONT後も制御端末から入力", suspension)
     case("Kitty応答エミュレータでの数式画像", math_images)
-    case("stdinが端末・stdoutが端末でない・不正UTF-8・上限超過", startup_errors)
+    case("stdinが端末・--watchとの併用・stdoutが端末でない・不正UTF-8・上限超過", startup_errors)
     case("読込中のCtrl+c・SIGTERM", interrupted_while_reading)
     case("制御端末なし", without_controlling_terminal)
     case("手動再読込・検索の再計算・削除と不正UTF-8で旧表示維持・atomic save", manual_reload)
     case("再読込で数式が現れたら画像対応を確認", reload_adds_math)
     case("再読込で数式が変わると画像を送り直し、古い画像を解放", reload_replaces_math_images)
+    case("--watchの自動再読込・変化なし・削除と復旧", watch_reload)

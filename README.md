@@ -36,6 +36,7 @@ fumi notes.md                             # 通常表示
 fumi --plain notes.md                     # 画像を使わないテキスト表示
 fumi --graphics off --color never notes.md  # 数式画像なし・色なし
 cat notes.md | fumi -                     # 標準入力から読む
+fumi --watch notes.md                     # 保存されたら自動で読み直す
 fumi --help
 ```
 
@@ -44,6 +45,7 @@ fumi --help
 | `--plain` | — | 画像表示と端末の画像対応の確認を行わない、テキストだけの全画面表示。検索・色・表は使えます |
 | `--graphics` | **`auto`** / `off` / `kitty` | 数式画像の表示方法。`--plain`を指定するとこちらより優先されます |
 | `--color` | **`auto`** / `always` / `never` | 色の有無。`auto`では環境変数`NO_COLOR`（空でない値）に従います |
+| `--watch` | — | ファイルの変更を監視し、保存されたら自動で読み直します。標準入力（`fumi -`）とは併用できません |
 
 ### キー操作
 
@@ -77,5 +79,4 @@ fumi --help
 
 - Markdown中の画像の表示（代替テキストのみ表示）
 - インライン数式（`$ ... $`）の画像化
-- ファイル変更時の自動再読み込み
 - 見出しの拡大表示

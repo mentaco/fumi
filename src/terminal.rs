@@ -204,6 +204,9 @@ pub fn run(
             }
             dirty = true;
         }
+        if let Some(reloader) = &mut reloader {
+            reloader.check(Instant::now());
+        }
         if let Some(result) = reloader.as_mut().and_then(Reloader::poll) {
             match result {
                 Ok(document) => {

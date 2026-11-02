@@ -3,7 +3,7 @@ use fumi::{
     app::{Action, App},
     document::Document,
     math::{self, Request, Status, View},
-    reload::{Reloader, reason},
+    reload::{Reloader, WATCH_INTERVAL, reason, stamp},
     source::{MAX_BYTES, decode, read_stream},
 };
 use std::{
@@ -352,4 +352,115 @@ fn reloader_resolves_symlinks_and_atomic_replacements_each_time() {
     reloader.request();
     assert_eq!(reloaded(&mut reloader).unwrap().source, "saved");
     assert_eq!(std::fs::read_to_string(&first).unwrap(), "first");
+}
+
+/// `--watch` の確認を間隔ごとに進め、読み直しを始めたら結果を返す。最大 `checks` 回確かめる。
+fn watched(
+    reloader: &mut Reloader,
+    now: &mut Instant,
+    checks: usize,
+) -> Option<std::io::Result<Document>> {
+    for _ in 0..checks {
+        *now += WATCH_INTERVAL;
+        if reloader.check(*now) {
+            return Some(reloaded(reloader));
+        }
+    }
+    None
+}
+
+#[test]
+fn watch_reloads_after_the_change_is_stable_for_one_more_check() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("doc.md");
+    std::fs::write(&path, "first").unwrap();
+    let mut now = Instant::now();
+    let mut reloader = Reloader::watching(path.clone(), stamp(&path), now);
+    // 変化がなければ読まない。間隔より早い確認では状態を見ない。
+    assert!(watched(&mut reloader, &mut now, 5).is_none());
+    std::fs::write(&path, "second!").unwrap();
+    assert!(!reloader.check(now + WATCH_INTERVAL / 2));
+    now += WATCH_INTERVAL;
+    assert!(!reloader.check(now), "最初に変化を見つけた確認では読まない");
+    // 次の確認までに書き換わったら、さらに次の確認まで待つ。
+    std::fs::write(&path, "third!!!").unwrap();
+    now += WATCH_INTERVAL;
+    assert!(!reloader.check(now));
+    assert_eq!(
+        watched(&mut reloader, &mut now, 1).unwrap().unwrap().source,
+        "third!!!"
+    );
+    assert!(
+        watched(&mut reloader, &mut now, 5).is_none(),
+        "読んだ後は同じ状態で読み直さない"
+    );
+}
+
+#[test]
+fn watch_detects_same_size_rewrites_by_modification_time() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("doc.md");
+    std::fs::write(&path, "aaaa").unwrap();
+    let file = std::fs::File::options().write(true).open(&path).unwrap();
+    file.set_modified(std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000))
+        .unwrap();
+    let mut now = Instant::now();
+    let mut reloader = Reloader::watching(path.clone(), stamp(&path), now);
+    std::fs::write(&path, "bbbb").unwrap();
+    assert_eq!(
+        watched(&mut reloader, &mut now, 3).unwrap().unwrap().source,
+        "bbbb"
+    );
+}
+
+#[test]
+fn watch_retries_only_on_the_next_change_after_a_failure() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("doc.md");
+    std::fs::write(&path, "first").unwrap();
+    let mut now = Instant::now();
+    let mut reloader = Reloader::watching(path.clone(), stamp(&path), now);
+    std::fs::remove_file(&path).unwrap();
+    let error = watched(&mut reloader, &mut now, 3).unwrap().unwrap_err();
+    assert_eq!(reason(&error), "ファイルが見つかりません");
+    assert!(
+        watched(&mut reloader, &mut now, 5).is_none(),
+        "削除されたままなら再試行しない"
+    );
+    std::fs::write(&path, b"\xff").unwrap();
+    assert!(watched(&mut reloader, &mut now, 3).unwrap().is_err());
+    assert!(watched(&mut reloader, &mut now, 5).is_none());
+    // atomic saveによる置換はinodeの変化として見つかる。
+    let temporary = directory.path().join(".doc.md.tmp");
+    std::fs::write(&temporary, "saved").unwrap();
+    std::fs::rename(&temporary, &path).unwrap();
+    assert_eq!(
+        watched(&mut reloader, &mut now, 3).unwrap().unwrap().source,
+        "saved"
+    );
+}
+
+#[test]
+fn manual_reload_also_updates_the_watched_state() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("doc.md");
+    std::fs::write(&path, "first").unwrap();
+    let mut now = Instant::now();
+    let mut reloader = Reloader::watching(path.clone(), stamp(&path), now);
+    std::fs::write(&path, "second").unwrap();
+    reloader.request();
+    assert_eq!(reloaded(&mut reloader).unwrap().source, "second");
+    // 手動で読んだ内容を、自動再読込で読み直さない。
+    assert!(watched(&mut reloader, &mut now, 5).is_none());
+    // 手動の読込中は状態を比べず、読み直しを重ねない。
+    std::fs::write(&path, "third!").unwrap();
+    reloader.request();
+    assert!(!reloader.check(now + WATCH_INTERVAL * 10));
+    assert_eq!(reloaded(&mut reloader).unwrap().source, "third!");
+    let mut manual = Reloader::new(path.clone());
+    std::fs::write(&path, "fourth!!").unwrap();
+    assert!(
+        watched(&mut manual, &mut now, 5).is_none(),
+        "--watchなしでは監視しない"
+    );
 }
