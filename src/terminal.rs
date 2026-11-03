@@ -10,16 +10,21 @@ use crate::{
 use crossterm::{
     cursor::{Hide, Show},
     event::{DisableBracketedPaste, EnableBracketedPaste, Event},
-    execute,
+    execute, queue,
     style::{Attribute, ResetColor, SetAttribute},
-    terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{
+        self, BeginSynchronizedUpdate, EndSynchronizedUpdate, EnterAlternateScreen,
+        LeaveAlternateScreen,
+    },
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
 use signal_hook::{SigId, consts::signal::*, flag};
 use std::{
+    cell::Cell,
     fs::{File, OpenOptions},
-    io::{self, Write},
+    io::{self, Stdout, Write},
     os::fd::AsRawFd,
+    rc::Rc,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -101,9 +106,63 @@ pub fn replace_stdin(tty: File) -> io::Result<()> {
     Ok(())
 }
 
+/// 1フレーム分の出力をためて、端末の同期更新で囲んで一度に書き出す。
+/// 画像の配置・本文・画像の再配置の途中の画面を端末に表示させないため。
+/// 同期更新に未対応の端末は囲みを無視するが、一度に書き出すことで途中の画面が出にくくなる。
+/// ratatuiの端末が出力を所有するため、フレームの途中かどうかは `Frames` と共有する。
+struct Output {
+    buffer: Vec<u8>,
+    stdout: Stdout,
+    /// フレームの途中か。途中の `flush` では書き出さない。
+    framing: Rc<Cell<bool>>,
+}
+impl Write for Output {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.buffer.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        if self.framing.get() {
+            return Ok(());
+        }
+        // 書き出しに失敗しても、次のフレームへ古い出力を持ち越さない。
+        let bytes = std::mem::take(&mut self.buffer);
+        let mut stdout = self.stdout.lock();
+        stdout.write_all(&bytes)?;
+        stdout.flush()
+    }
+}
+
+type Screen = Terminal<CrosstermBackend<Output>>;
+
+/// `Output` のフレームの開始と終了。
+struct Frames(Rc<Cell<bool>>);
+impl Frames {
+    fn screen() -> io::Result<(Screen, Self)> {
+        let framing = Rc::new(Cell::new(false));
+        let output = Output {
+            buffer: Vec::new(),
+            stdout: io::stdout(),
+            framing: Rc::clone(&framing),
+        };
+        Ok((Terminal::new(CrosstermBackend::new(output))?, Self(framing)))
+    }
+    fn begin(&self, screen: &mut Screen) -> io::Result<()> {
+        self.0.set(true);
+        queue!(screen.backend_mut(), BeginSynchronizedUpdate)
+    }
+    fn end(&self, screen: &mut Screen) -> io::Result<()> {
+        queue!(screen.backend_mut(), EndSynchronizedUpdate)?;
+        self.0.set(false);
+        screen.backend_mut().flush()
+    }
+}
+
 /// 復旧は各段階を独立に試みる。出力失敗でraw mode解除を飛ばさない。
 fn restore() {
     let mut stdout = io::stdout();
+    // フレームの書き出し途中で失敗した場合も、端末を同期更新の待ちに残さない。
+    let _ = execute!(stdout, EndSynchronizedUpdate);
     crate::graphics::cleanup();
     if MOUSE.swap(false, Ordering::SeqCst) {
         let _ = write!(stdout, "\x1b[?1000l\x1b[?1006l");
@@ -175,7 +234,7 @@ pub fn run(
         return Ok(code);
     }
     let mut guard = Guard::enter()?;
-    let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
+    let (mut terminal, frames) = Frames::screen()?;
     let size = terminal.size()?;
     crate::profile::mark("terminal_ms");
     app.resize(size.width, size.height);
@@ -236,7 +295,7 @@ pub fn run(
             dirty |= app.set_images(views, Status::Pending);
         }
         if dirty && last_draw.elapsed() >= FRAME {
-            kitty.clear_placements(terminal.backend_mut())?;
+            frames.begin(&mut terminal)?;
             let prepared = kitty.prepare(&app.view_state(), terminal.backend_mut());
             // 描画の直前に端末サイズが変わると描けない。次の周回でサイズを合わせて描き直す。
             let mut drawn = false;
@@ -250,6 +309,8 @@ pub fn run(
             }
             let placed = match prepared {
                 Ok(()) if drawn => kitty.draw(&app.view_state(), terminal.backend_mut()),
+                // 本文を描けなかった場合は、前のフレームの配置を残さない。
+                Ok(()) => kitty.clear_placements(terminal.backend_mut()),
                 result => result,
             };
             if placed.is_err() {
@@ -258,6 +319,7 @@ pub fn run(
                     drawn = app.draw(f);
                 })?;
             }
+            frames.end(&mut terminal)?;
             crate::profile::finish()?;
             last_draw = Instant::now();
             dirty = !drawn;

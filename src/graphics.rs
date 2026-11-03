@@ -447,6 +447,14 @@ impl Kitty {
         self.transferred.clear();
         self.placed.clear();
     }
+    /// 転送済みの画像をすべて解放する。`reset` と違い、描画中のフレームの出力へ送る。
+    fn release_all(&mut self, output: &mut impl Write) -> io::Result<()> {
+        self.placed.clear();
+        for (_, (id, _)) in self.transferred.drain() {
+            release_image(id, self.transport, output)?;
+        }
+        Ok(())
+    }
     fn release(&self, id: u32, output: &mut impl Write) -> io::Result<()> {
         release_image(id, self.transport, output)
     }
@@ -457,8 +465,8 @@ impl Kitty {
     /// 画像を先に転送する。Unicodeセルはratatuiの差分管理に含める。
     pub fn prepare(&mut self, view: &ViewState, output: &mut impl Write) -> io::Result<()> {
         let Some(views) = view.shown_images() else {
-            self.reset();
-            return Ok(());
+            self.release_all(output)?;
+            return output.flush();
         };
         let mut visible = HashSet::new();
         for (_, line) in view.screen_lines() {
@@ -562,10 +570,24 @@ impl Kitty {
         }
     }
     /// 直接接続時だけ、本文描画後のカーソル座標へ画像を配置する。
+    /// 同じ画像IDと配置IDで配置し直すと端末が前の配置を置き換えるため、表示し続ける画像は
+    /// 消さずに置き直す。消してから置くと、その間に画像のない画面が表示され得る。
     pub fn draw(&mut self, view: &ViewState, output: &mut impl Write) -> io::Result<()> {
-        if self.transport == Transport::Tmux || view.shown_images().is_none() {
-            return Ok(());
+        let previous = std::mem::take(&mut self.placed);
+        if self.transport != Transport::Tmux && view.shown_images().is_some() {
+            self.place(view, output)?;
         }
+        // 解放済みの画像は配置も消えている。
+        let transferred: HashSet<_> = self.transferred.values().map(|(id, _)| *id).collect();
+        for id in previous.difference(&self.placed) {
+            if transferred.contains(id) {
+                self.transport
+                    .control(output, &delete_command(*id, false))?;
+            }
+        }
+        output.flush()
+    }
+    fn place(&mut self, view: &ViewState, output: &mut impl Write) -> io::Result<()> {
         let mut visible = HashSet::new();
         for (row, line) in view.screen_lines() {
             let Some((source, offset)) = line.image else {
@@ -593,7 +615,7 @@ impl Kitty {
             )?;
             self.placed.insert(*id);
         }
-        output.flush()
+        Ok(())
     }
 }
 
@@ -614,6 +636,72 @@ mod tests {
             Transport::Tmux.control(&mut bytes, command).unwrap();
         }
         assert_eq!(bytes, b"\x1bPtmux;\x1b\x1b_Ga=t;AAAA\x1b\x1b\\\x1b\\\x1bPtmux;\x1b\x1b_Ga=d,d=I,i=42\x1b\x1b\\\x1b\\");
+    }
+
+    #[test]
+    fn direct_placements_are_replaced_in_place_and_removed_off_screen() {
+        let mut app = App::new(
+            Document::parse("before\n\n$$ x $$\n\nafter\n\n".repeat(10)),
+            "test.md",
+            true,
+        );
+        app.resize(40, 5);
+        app.enable_graphics();
+        let source = app
+            .document()
+            .nodes
+            .iter()
+            .find(|n| matches!(n.kind, Kind::Math { .. }))
+            .unwrap()
+            .source
+            .start;
+        let image = Arc::new(Image {
+            png: vec![],
+            width: 30,
+            height: 80,
+            columns: 3,
+            rows: 4,
+        });
+        app.set_images(
+            HashMap::from([(source, View::Ready(image))]),
+            Default::default(),
+        );
+        let start = app
+            .lines()
+            .iter()
+            .position(|line| line.image == Some((source, 0)))
+            .unwrap();
+        let mut kitty = Kitty::new(Transport::Direct);
+        let frame = |kitty: &mut Kitty, app: &App| {
+            let mut bytes = Vec::new();
+            kitty.prepare(&app.view_state(), &mut bytes).unwrap();
+            kitty.draw(&app.view_state(), &mut bytes).unwrap();
+            String::from_utf8(bytes).unwrap()
+        };
+        app.scroll_to(start);
+        let first = frame(&mut kitty, &app);
+        let id = kitty.transferred[&source].0;
+        assert!(first.contains(&format!("a=p,i={id},p=1,")));
+        // 表示し続ける画像は消さずに、同じ配置IDで置き直す。
+        app.scroll_to(start + 1);
+        let moved = frame(&mut kitty, &app);
+        assert!(!moved.contains("a=d"), "{moved:?}");
+        assert!(moved.contains(&format!("a=p,i={id},p=1,x=0,y=20,")));
+        // 全体が画面外へ出た画像は、配置を消して画像も解放する。
+        app.scroll_to(start + 4);
+        let gone = frame(&mut kitty, &app);
+        assert!(gone.contains(&delete_command(id, true)), "{gone:?}");
+        assert!(!gone.contains("a=p"));
+        // ヘルプ表示中は配置を残さず、閉じると新しい画像を置き直す。
+        app.scroll_to(start);
+        frame(&mut kitty, &app);
+        let id = kitty.transferred[&source].0;
+        app.key(KeyEvent::from(KeyCode::Char('?')));
+        let help = frame(&mut kitty, &app);
+        assert!(help.contains(&delete_command(id, true)), "{help:?}");
+        assert!(!help.contains("a=p"));
+        app.key(KeyEvent::from(KeyCode::Char('?')));
+        assert!(frame(&mut kitty, &app).contains("a=p"));
     }
 
     #[test]
