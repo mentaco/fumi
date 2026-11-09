@@ -34,6 +34,8 @@ def terminal_settings(attributes):
 
 
 class Session:
+    CLOSE_WAIT = 5
+
     def __init__(self, args, term="xterm-256color", stdin_tty=True, stdout_tty=True, stderr_tty=True, no_color=None, binary=None, extra_env=None, size=(80, 24), exec_clock_env=None, stdin_fd=None, close_fds=(), cwd=None):
         self.master, self.slave = os.openpty()
         self.resize(*size)
@@ -210,15 +212,28 @@ class Session:
             except ProcessLookupError:
                 pass
         os.close(self.keepalive)
-        os.waitpid(self.supervisor, 0)
+        # macOSではセッションリーダーの終了時に端末の未読の出力が空になるのを待つため、
+        # masterを読まずに待つと監督プロセスと互いに待ち合って止まる。
+        self.forced_close = False
+        until = time.monotonic() + self.CLOSE_WAIT
+        while os.waitpid(self.supervisor, os.WNOHANG)[0] == 0:
+            if time.monotonic() >= until:
+                self.forced_close = True
+                os.kill(self.supervisor, signal.SIGKILL)
+                break
+            self.pump(0.01)
         self.status_pipe.close()
+        # 終了処理中のプロセスにシグナルは効かない。masterを閉じると出力の待ちが解ける。
         os.close(self.master)
+        if self.forced_close:
+            os.waitpid(self.supervisor, 0)
         os.close(self.slave)
 
 
 def case(name, callback):
     callback()
-    print("PASS", name)
+    # 標準出力がパイプでも、途中で止まったときにどこまで進んだかをログに残す。
+    print("PASS", name, flush=True)
 
 
 def interaction():
@@ -415,6 +430,17 @@ def color_modes():
             session.close()
 
 
+def close_with_unread_output():
+    """検証が途中で失敗し、fumiの出力を読み残したまま後始末へ進んでも止まらない。"""
+    session = Session([FIXTURE])
+    try:
+        ready, _, _ = select.select([session.master], [], [], 5)
+        assert ready, "fumiの出力が届かない"
+    finally:
+        session.close()
+    assert not session.forced_close, "未読の出力で監督プロセスが終了できなかった"
+
+
 def restoration_faults():
     # cargo testで作成されたlibテスト実行ファイルを選ぶ。
     for candidate in sorted(Path(BINARY).parent.joinpath("deps").glob("fumi-*"), key=lambda path: path.stat().st_mtime, reverse=True):
@@ -449,4 +475,5 @@ if __name__ == "__main__":
     case("TTY・TERM・ファイル読込エラー", errors)
     case("本文・ファイル名の制御文字", controls)
     case("色指定とNO_COLORの優先順位", color_modes)
+    case("未読の出力が残っても検証の後始末が止まらない", close_with_unread_output)
     case("初期化途中の出力失敗・panic時の端末復旧", restoration_faults)

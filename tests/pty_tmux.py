@@ -17,24 +17,8 @@ PLACEHOLDER = "\U0010eeee"
 
 
 class TmuxSession(Session):
-    def close(self):
-        # tmuxのデーモン化でPTYの監督プロセスの回収が遅れる場合も確実に終了する。
-        if self.status is None:
-            try:
-                os.kill(self.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-        os.close(self.keepalive)
-        until = time.monotonic() + 1
-        while os.waitpid(self.supervisor, os.WNOHANG)[0] == 0:
-            if time.monotonic() >= until:
-                os.kill(self.supervisor, signal.SIGKILL)
-                os.waitpid(self.supervisor, 0)
-                break
-            time.sleep(.01)
-        self.status_pipe.close()
-        os.close(self.master)
-        os.close(self.slave)
+    # tmuxのデーモン化でPTYの監督プロセスの回収が遅れることがあり、長くは待たない。
+    CLOSE_WAIT = 1
 
     def __init__(self, socket, config, args):
         self.responded = 0
