@@ -25,11 +25,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: Rustのバージョンを記録
+      # macosのランナーにはtmuxが入っておらず、pty_tmux.pyが実行されない
+      - name: tmuxを導入
+        if: runner.os == 'macOS'
+        run: brew install tmux
+      - name: ツールのバージョンを記録
         run: |
           rustc --version
           cargo --version
           cargo clippy --version
+          tmux -V
       - run: cargo fmt --all -- --check
       - run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - run: cargo test --locked --all-targets --all-features
@@ -37,3 +42,15 @@ jobs:
       - run: python3 tests/pty_v1.py target/debug/fumi
       - run: python3 tests/pty_tmux.py target/debug/fumi
       - run: python3 tests/pty_v2.py target/debug/fumi
+  # Cargo.tomlのrust-versionと合わせる。fmt・Clippyは版で結果が変わるためstableだけで行う
+  msrv:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.88
+      - run: rustc --version
+      - run: cargo test --locked --all-targets --all-features
