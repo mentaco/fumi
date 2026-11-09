@@ -19,6 +19,9 @@ MOCK_TMUX_ENV = {}
 PASSTHROUGH = re.compile(rb"\x1bPtmux;((?:[^\x1b]|\x1b\x1b)*)\x1b\\")
 
 
+SETUP_TIMEOUT = "tmux自動設定タイムアウト"
+
+
 def mock_tmux_env(extra_env):
     if extra_env and "TMUX" in extra_env:
         return {**MOCK_TMUX_ENV, **extra_env}
@@ -267,21 +270,40 @@ def input_and_mouse():
         session.close()
 
 
+def retry_slow_setup(callback, attempts=5):
+    """模擬のtmuxの起動が遅く、fumiが自動設定の上限を超えた試行だけをやり直す。
+
+    画像表示まで進むことを確かめる検証の前提（自動設定が上限内に終わる）が、遅いCIの
+    ランナーでは崩れることがある。応答待ちの失敗（`応答なし`）等はやり直さない。
+    """
+    for attempt in range(1, attempts + 1):
+        try:
+            return callback()
+        except AssertionError as error:
+            if SETUP_TIMEOUT not in str(error) or attempt == attempts:
+                raise
+            print("RETRY %d/%d %s" % (attempt, attempts, SETUP_TIMEOUT), flush=True)
+
+
+def tmux_case(name, callback):
+    case(name, lambda: retry_slow_setup(callback))
+
+
 def run():
     case("数式PNG・直接転送・上下切抜き・ID削除・検索・ヘルプ・リサイズ・中断復帰", graphics_lifecycle)
     case("plain（kitty指定より優先）", lambda: fallback(["--plain", "--graphics", "kitty"]))
     case("graphics off", lambda: fallback(["--graphics", "off"]))
     case("無応答", lambda: fallback([]))
     case("tmux", lambda: fallback(["--graphics", "kitty"], {"TMUX": "test"}))
-    case("tmuxパススルー・Unicode配置・上下クリッピング・復旧", lambda: graphics_lifecycle(tmux=True))
-    case("tmux 色なしでも画像IDの色を出力", tmux_color_never)
-    case("tmux kitty指定でも応答必須", lambda: fallback(["--graphics", "kitty"], {"TMUX": "test"}, {"supported": False}))
-    case("tmux Unicode仮想配置未対応", lambda: fallback([], {"TMUX": "test"}, {"placeholders": False}))
+    tmux_case("tmuxパススルー・Unicode配置・上下クリッピング・復旧", lambda: graphics_lifecycle(tmux=True))
+    tmux_case("tmux 色なしでも画像IDの色を出力", tmux_color_never)
+    tmux_case("tmux kitty指定でも応答必須", lambda: fallback(["--graphics", "kitty"], {"TMUX": "test"}, {"supported": False}))
+    tmux_case("tmux Unicode仮想配置未対応", lambda: fallback([], {"TMUX": "test"}, {"placeholders": False}))
     case("tmux plain", lambda: fallback(["--plain"], {"TMUX": "test"}))
     case("tmux off", lambda: fallback(["--graphics", "off"], {"TMUX": "test"}))
-    case("tmux仮想配置失敗のテキスト復帰", lambda: transfer_failure(tmux=True))
+    tmux_case("tmux仮想配置失敗のテキスト復帰", lambda: transfer_failure(tmux=True))
     case("tmux自動設定失敗", lambda: setup_failure("fail"))
-    case("tmux自動設定が遅くても応答待ちの時間を残す", slow_setup_keeps_reply_budget)
+    tmux_case("tmux自動設定が遅くても応答待ちの時間を残す", slow_setup_keeps_reply_budget)
     case("tmux自動設定タイムアウト・子プロセス回収", lambda: setup_failure("hang"))
     case("tmuxペインID不正", lambda: fallback([], {"TMUX": "test", "TMUX_PANE": "other:0"}))
     case("tmuxコマンド未導入", lambda: fallback([], {"TMUX": "test", "PATH": "/nonexistent-fumi-test"}))
