@@ -71,6 +71,15 @@ def started_kitty(session, **reply):
     assert "KITTY" in session.screen()[-1], session.screen()[-1]
 
 
+def wait_for_screen(session, text, seconds=6):
+    """再生した画面に `text` が出るまで待つ。遅いランナーでは固定の待ちでは表示が間に合わず、
+    差分描画では文字列が出力に連続して現れるとは限らない。"""
+    until = time.monotonic() + seconds
+    while not any(text in row for row in session.screen()):
+        session.pump(.05)
+        assert time.monotonic() < until, "%s が画面に出ない: %s" % (text, session.screen())
+
+
 def commands(session, since=0):
     result = []
     for match in APC.finditer(unwrapped(bytes(session.data[since:]))):
@@ -229,8 +238,7 @@ def query_keys_and_late_replies():
         session.pump(.03)
         session.send(b"/hello world\r")
         session.started()
-        session.pump(.2)
-        assert "1/3" in session.visible(), session.visible()
+        wait_for_screen(session, "1/3")
         # タイムアウト後のAPC/OSC応答に含まれる q 等が終了キーにならない。
         session.send(b"\x1b_Gi=4000000001;quite late\x1b\\\x1b]11;rgb:0000/0000/0000\x1b\\")
         session.send(b"/q\x03")
@@ -247,7 +255,7 @@ def transfer_failure(tmux=False):
         started_kitty(session)
         image_id = next(f[b"i"] for f, _ in commands(session) if f.get(b"a") == b"t")
         session.send(b"\x1b_Gi=" + image_id + b";EINVAL: injected failure\x1b\\")
-        assert "画像転送失敗" in session.visible()
+        wait_for_screen(session, "画像転送失敗")
         session.send(b"q")
         session.wait(0)
     finally:
