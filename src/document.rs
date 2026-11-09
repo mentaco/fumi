@@ -1,4 +1,4 @@
-use crate::picture::local_path;
+use crate::{highlight::HighlightCache, picture::local_path};
 use pulldown_cmark::{Event, Options, Parser, Tag};
 use std::{ops::Range, path::PathBuf};
 
@@ -30,6 +30,7 @@ pub struct Node {
 pub struct Document {
     pub source: String,
     pub nodes: Vec<Node>,
+    pub(crate) highlights: HighlightCache,
 }
 
 fn options() -> Options {
@@ -389,6 +390,10 @@ impl Document {
                 nodes.push(node);
             }
         }
-        Self { source, nodes }
+        Self {
+            source,
+            nodes,
+            highlights: HighlightCache::default(),
+        }
     }
 }

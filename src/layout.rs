@@ -1,6 +1,6 @@
 use crate::{
     document::{Document, Kind, Node},
-    highlight::highlight,
+    highlight::{Token, highlight},
     search::Segment,
     source::sanitize,
 };
@@ -755,7 +755,12 @@ pub fn layout_with_images(
         let rendered: String = line.runs.iter().map(|r| r.text.as_str()).collect();
         let mut data = cells(&line, document, colors, &rendered);
         if colors && let Some(language) = &line.language {
-            apply_highlight(&mut data, &rendered, language);
+            let tokens = document
+                .highlights
+                .get_or_compute((line.source, rendered.len()), || {
+                    highlight(&rendered, language)
+                });
+            apply_highlight(&mut data, &tokens);
         }
         wrap(&line, &data, width, &mut result);
     }
@@ -781,14 +786,10 @@ fn rule_line(line: &LogicalLine, width: usize) -> DisplayLine {
 }
 
 /// ソース対応を作ってから装飾だけを重ねる。引用・字下げでコードの元位置が飛んでも対応を壊さない。
-fn apply_highlight(data: &mut [Cell], rendered: &str, language: &str) {
-    let tokens = highlight(
-        vec![run(rendered, Style::default(), 0..rendered.len())],
-        language,
-    );
+fn apply_highlight(data: &mut [Cell], tokens: &[Token]) {
     let mut token = 0;
     for cell in data {
-        while token + 1 < tokens.len() && tokens[token].source.end <= cell.offset {
+        while token + 1 < tokens.len() && tokens[token].end <= cell.offset {
             token += 1;
         }
         if let Some(highlight) = tokens.get(token) {

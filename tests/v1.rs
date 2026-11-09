@@ -566,6 +566,31 @@ fn generation_update_at_tiny_size_does_not_reuse_a_tiny_layout_after_expansion()
 }
 
 #[test]
+fn relayout_at_any_width_colors_code_like_a_fresh_layout() {
+    // 複数行のコメントは行をまたいで色が続き、同じ長さの別のブロックとは色が混ざらない。
+    let source = "```rust\n/* 複数行の日本語のコメントが狭い画面で折り返される\n続きの行 */\nfn main() { let value = \"日本語の文字列\"; }\n```\n\n\
+                  ```python\ndef main(): return 'abc'\n```\n\n```ruby\ndef main; return 'abcd'; end\n```\n\n\
+                  > ```rust\n> fn nested() {}\n> ```\n\n```no-such-language\nfn main() {}\n```\n";
+    let doc = Document::parse(source.into());
+    for width in [80, 20, 33, 80, 20] {
+        let again = layout(&doc, width, true);
+        let fresh = layout(&Document::parse(source.into()), width, true);
+        assert_eq!(
+            again.iter().map(|l| &l.line).collect::<Vec<_>>(),
+            fresh.iter().map(|l| &l.line).collect::<Vec<_>>(),
+            "幅{width}"
+        );
+        assert!(
+            again
+                .iter()
+                .flat_map(|l| &l.line.spans)
+                .any(|s| s.style.fg.is_some()),
+            "幅{width}"
+        );
+    }
+}
+
+#[test]
 fn highlighting_preserves_source_ranges_inside_nested_code() {
     let doc = Document::parse("> ```rust\n> fn main() {\n>     let value = 1;\n> }\n> ```".into());
     let colored = layout(&doc, 40, true);
