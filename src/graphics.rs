@@ -124,6 +124,20 @@ pub struct Capabilities {
     pub monochrome: bool,
 }
 
+/// 自動設定と応答待ちの上限を分けて数える。コマンドの起動が遅い環境でも、応答待ちの
+/// 時間を自動設定に使い切らないようにするため（仕様8.1節）。`wait` の期限は自動設定の
+/// 完了後に決める。時刻は `now` から受け取り、実時間によらず試験できるようにする。
+fn with_separate_deadlines<T>(
+    now: impl Fn() -> Instant,
+    setup: Option<impl FnOnce(Instant) -> Result<(), &'static str>>,
+    wait: impl FnOnce(Instant) -> T,
+) -> Result<T, &'static str> {
+    if let Some(setup) = setup {
+        setup(now() + TMUX_SETUP_TIMEOUT)?;
+    }
+    Ok(wait(now() + QUERY_TIMEOUT))
+}
+
 pub fn query(
     mode: GraphicsMode,
     plain: bool,
@@ -143,23 +157,26 @@ pub fn query(
     // ペインのリサイズでは確認済みの対応状態を再利用し、寸法と色だけ更新する。
     let reused =
         transport == Transport::Tmux && previous.is_some_and(|c| c.transport == Transport::Tmux);
-    // 自動設定と応答待ちの上限を分ける。コマンドの起動が遅い環境でも、
-    // 応答待ちの時間を自動設定に使い切らないようにするため（仕様8.1節）。
-    if transport == Transport::Tmux
-        && !reused
-        && let Err(reason) = enable_tmux_passthrough(Instant::now() + TMUX_SETUP_TIMEOUT)
-    {
-        return Ok(Err(reason.into()));
-    }
-    let start = Instant::now();
-    let probe_id = (transport == Transport::Tmux && !reused).then(next_id);
-    send_probes(&mut output, transport, !reused, probe_id)?;
-    let mut replies = Replies {
-        supported: reused,
-        placeholders: transport != Transport::Tmux || reused,
-        ..Default::default()
+    let first_tmux_query = transport == Transport::Tmux && !reused;
+    let probe_id = first_tmux_query.then(next_id);
+    let replies = with_separate_deadlines(
+        Instant::now,
+        first_tmux_query.then_some(enable_tmux_passthrough),
+        |deadline| -> io::Result<Replies> {
+            send_probes(&mut output, transport, !reused, probe_id)?;
+            let mut replies = Replies {
+                supported: reused,
+                placeholders: transport != Transport::Tmux || reused,
+                ..Default::default()
+            };
+            collect_replies(decoder, &mut replies, probe_id, deadline)?;
+            Ok(replies)
+        },
+    );
+    let replies = match replies {
+        Ok(replies) => replies?,
+        Err(reason) => return Ok(Err(reason.into())),
     };
-    collect_replies(decoder, &mut replies, probe_id, start)?;
     if let Some(id) = probe_id {
         release_image(id, transport, &mut output)?;
         output.flush()?;
@@ -255,14 +272,14 @@ fn collect_replies(
     decoder: &mut Decoder,
     replies: &mut Replies,
     probe_id: Option<u32>,
-    start: Instant,
+    deadline: Instant,
 ) -> io::Result<()> {
     let mut users = VecDeque::new();
-    while start.elapsed() < QUERY_TIMEOUT {
+    while Instant::now() < deadline {
         input::read(
             decoder,
-            QUERY_TIMEOUT
-                .saturating_sub(start.elapsed())
+            deadline
+                .saturating_duration_since(Instant::now())
                 .min(Duration::from_millis(8)),
         )?;
         while let Some(event) = decoder.events.pop_front() {
@@ -628,6 +645,50 @@ mod tests {
     };
     use crossterm::event::{KeyCode, KeyEvent};
     use ratatui::{Terminal, backend::TestBackend};
+    use std::cell::Cell;
+
+    #[test]
+    fn reply_wait_is_counted_after_a_slow_tmux_setup() {
+        let start = Instant::now();
+        let clock = Cell::new(start);
+        // 上限ぎりぎりまで自動設定に時間を使っても、応答待ちの時間は丸ごと残る。
+        let spent = TMUX_SETUP_TIMEOUT - Duration::from_millis(1);
+        let setup_deadline = Cell::new(None);
+        let reply_deadline = with_separate_deadlines(
+            || clock.get(),
+            Some(|deadline| {
+                setup_deadline.set(Some(deadline));
+                clock.set(clock.get() + spent);
+                Ok(())
+            }),
+            |deadline| deadline,
+        );
+        assert_eq!(setup_deadline.get(), Some(start + TMUX_SETUP_TIMEOUT));
+        assert_eq!(reply_deadline, Ok(start + spent + QUERY_TIMEOUT));
+    }
+
+    #[test]
+    fn reply_wait_is_counted_from_the_start_without_tmux_setup() {
+        let start = Instant::now();
+        let reply_deadline = with_separate_deadlines(
+            || start,
+            None::<fn(Instant) -> Result<(), &'static str>>,
+            |deadline| deadline,
+        );
+        assert_eq!(reply_deadline, Ok(start + QUERY_TIMEOUT));
+    }
+
+    #[test]
+    fn failed_tmux_setup_returns_its_reason_without_waiting_for_replies() {
+        let waited = Cell::new(false);
+        let result = with_separate_deadlines(
+            Instant::now,
+            Some(|_| Err("tmux自動設定タイムアウト")),
+            |_| waited.set(true),
+        );
+        assert_eq!(result, Err("tmux自動設定タイムアウト"));
+        assert!(!waited.get());
+    }
 
     #[test]
     fn tmux_passthrough_escapes_each_escape_and_keeps_commands_separate() {

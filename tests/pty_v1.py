@@ -20,6 +20,7 @@ PASSTHROUGH = re.compile(rb"\x1bPtmux;((?:[^\x1b]|\x1b\x1b)*)\x1b\\")
 
 
 SETUP_TIMEOUT = "tmux自動設定タイムアウト"
+NO_REPLY = "tmuxで画像対応の確認に応答なし"
 
 
 def mock_tmux_env(extra_env):
@@ -206,9 +207,8 @@ def tmux_color_never():
 
 
 def slow_setup_keeps_reply_budget():
-    # 自動設定と応答にそれぞれ60 ms以上かかっても、各上限（150 ms）に収まれば画像表示になる。
-    # 遅い環境での揺れに耐えるよう、各段階の余裕は大きく取る。
-    # コマンドの起動と応答の受け渡しを含む合計は150 msに近づき、一つの上限で数えると足りなくなり得る。
+    # 自動設定と応答にそれぞれ60 msかかっても、実際の経路で画像表示まで進むことの確認。
+    # 上限を別々に数えることの検出は、実時間によらないRustのテスト（src/graphics.rs）で行う。
     session = Session([V1], extra_env=mock_tmux_env({"TMUX": "test", "FUMI_TEST_TMUX_MODE": "slow"}))
     try:
         started_kitty(session, delay=.06)
@@ -278,23 +278,24 @@ def input_and_mouse():
         session.close()
 
 
-def retry_slow_setup(callback, attempts=5):
-    """模擬のtmuxの起動が遅く、fumiが自動設定の上限を超えた試行だけをやり直す。
+def retry_slow_setup(callback, reasons, attempts=5):
+    """`reasons` のいずれかで失敗した試行だけをやり直す。
 
-    画像表示まで進むことを確かめる検証の前提（自動設定が上限内に終わる）が、遅いCIの
-    ランナーでは崩れることがある。応答待ちの失敗（`応答なし`）等はやり直さない。
+    画像表示まで進むことを確かめる検証の前提（自動設定が上限内に終わる等）が、遅いCIの
+    ランナーでは崩れることがある。指定した理由以外の失敗はやり直さない。
     """
     for attempt in range(1, attempts + 1):
         try:
             return callback()
         except AssertionError as error:
-            if SETUP_TIMEOUT not in str(error) or attempt == attempts:
+            found = next((reason for reason in reasons if reason in str(error)), None)
+            if found is None or attempt == attempts:
                 raise
-            print("RETRY %d/%d %s" % (attempt, attempts, SETUP_TIMEOUT), flush=True)
+            print("RETRY %d/%d %s" % (attempt, attempts, found), flush=True)
 
 
-def tmux_case(name, callback):
-    case(name, lambda: retry_slow_setup(callback))
+def tmux_case(name, callback, reasons=(SETUP_TIMEOUT,)):
+    case(name, lambda: retry_slow_setup(callback, reasons))
 
 
 def run():
@@ -311,7 +312,7 @@ def run():
     case("tmux off", lambda: fallback(["--graphics", "off"], {"TMUX": "test"}))
     tmux_case("tmux仮想配置失敗のテキスト復帰", lambda: transfer_failure(tmux=True))
     case("tmux自動設定失敗", lambda: setup_failure("fail"))
-    tmux_case("tmux自動設定が遅くても応答待ちの時間を残す", slow_setup_keeps_reply_budget)
+    tmux_case("tmux自動設定が遅くても応答待ちの時間を残す", slow_setup_keeps_reply_budget, (SETUP_TIMEOUT, NO_REPLY))
     case("tmux自動設定タイムアウト・子プロセス回収", lambda: setup_failure("hang"))
     case("tmuxペインID不正", lambda: fallback([], {"TMUX": "test", "TMUX_PANE": "other:0"}))
     case("tmuxコマンド未導入", lambda: fallback([], {"TMUX": "test", "PATH": "/nonexistent-fumi-test"}))
