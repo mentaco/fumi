@@ -323,7 +323,7 @@ macOS 27.2（26B123）arm64、Apple M3、16 GiB、Rust 1.92.0、Python 3.9.6で�
 ### Rust 1.88とCI
 
 - `rust-version`の1.88.0で`cargo test --locked --all-targets --all-features`が成功した（macOS arm64）。PTY検証は1.88では実行していない。
-- CIに、ubuntu-latest・macos-latestのRust 1.88でテストするジョブを加えた。macos-latestにtmuxを導入し、これまで実行されていなかった`tests/pty_tmux.py`の6グループが動くようにした。**CIの変更はpushしておらず、GitHub Actionsでは未確認。**
+- CIに、ubuntu-latest・macos-latestのRust 1.88でテストするジョブを加えた。macos-latestにtmuxを導入し、これまで実行されていなかった`tests/pty_tmux.py`の6グループが動くようにした。pushした後の結果は[CIでのtmux自動設定の上限超え](#ciでのtmux自動設定の上限超え2026-11-09)を参照。
 
 ### 構成整理の後からの前後比較
 
@@ -404,3 +404,33 @@ macOS 27.2（26B123）arm64、Apple M3、16 GiB、Rust 1.92.0、Python 3.9.6で�
 ### 確認していないこと
 
 Linux、遅いCPU、メモリの少ない環境での結果。負荷の測定は各1回で、ばらつきは測っていない。実端末での入力遅延と描画時間。
+
+## CIでのtmux自動設定の上限超え（2026-11-09）
+
+`94f5a17`をpushした後のGitHub Actions（実行ID 42578083803）で、`test (macos-latest)`の`tests/pty_v1.py`が失敗した。`gh`でログを確認した。
+
+| ジョブ | 結果 | 内容 |
+|---|---|---|
+| `test (ubuntu-latest)` | 成功 | ubuntu-26.04。Rustテスト86件、PTY検証59グループ（実tmuxの6グループを含む） |
+| `test (macos-latest)` | 失敗 | macos-26-arm64。tmux 3.8の導入とRustテスト86件は成功。`tests/pty_v1.py`で失敗し、`tests/pty_tmux.py`・`tests/pty_v2.py`は実行されていない |
+| `msrv (ubuntu-latest)` | 成功 | Rust 1.88.0 |
+| `msrv (macos-latest)` | 成功 | Rust 1.88.0 |
+
+- 失敗したのは「tmux自動設定が遅くても応答待ちの時間を残す」。fumiの画面に`tmux自動設定タイムアウト`が出ており、約60 ms待つ模擬の`tmux`が、起動を含めて自動設定の上限150 msを超えた。超えた理由までは、ログからは分からない。
+- `94f5a17`までの変更はハイライト関連で、tmuxの自動設定の処理（`src/graphics.rs`）は変更していない。fumiの上限は変更しない。
+- この検証が検出する不具合（自動設定と応答待ちを一つの上限で数えること）は`応答なし`として現れる。自動設定の上限超えは、検証の前提が崩れた状態にあたる。待ち時間を短くすると検出力が落ちるため、`tmux自動設定タイムアウト`で失敗した試行だけを最大5回までやり直すようにした（`tests/pty_v1.py`の`retry_slow_setup`）。画像表示まで進むことを確かめるtmuxの模擬の検証6件に適用し、やり直しは`RETRY`としてログに出す。
+
+### 検証
+
+macOS 27.2（26B123）arm64、Python 3.9.6で、debugビルドを使って確認した。
+
+| 条件 | 結果 |
+|---|---|
+| 初回だけ模擬の`tmux`を0.3秒にする | やり直して成功 |
+| 模擬の`tmux`を常に0.3秒にする | 5回やり直しても成功せず失敗する |
+| 検証の条件のまま10回 | 10回成功（新しく作った模擬スクリプトの初回に1回やり直し） |
+| 分離前の`80af4d3`のバイナリで10回 | 3回が`応答なし`で失敗。`応答なし`はやり直されない |
+
+- `tests/pty_v1.py` 25グループが3回連続で成功した。Rustのコードは変更していない。
+- 分離前のバイナリでの失敗率は、当時の記録（10回中7回）より低い。この検証の検出は確率的で、1回の成功から不具合がないとは言えない。
+- この修正のGitHub Actionsでの結果は未確認で、macos-latestの`tests/pty_tmux.py`も未実行のまま。
