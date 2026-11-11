@@ -1,6 +1,6 @@
 use crate::{
     document::{Document, Kind, Node},
-    highlight::{Token, highlight},
+    highlight::{CodeOffsets, CodeRun, Key},
     search::Segment,
     source::sanitize,
 };
@@ -66,6 +66,8 @@ pub struct DisplayLine {
     pub mappings: Vec<Mapping>,
     pub image: Option<(usize, usize)>,
     pub destinations: Vec<Destination>,
+    /// ハイライトするコードの表示行の、論理行の文字列との対応。色は描画時に重ねる。
+    pub code: Option<CodeOffsets>,
 }
 
 impl DisplayLine {
@@ -77,6 +79,7 @@ impl DisplayLine {
             mappings,
             image: None,
             destinations: Vec::new(),
+            code: None,
         }
     }
     pub fn text(&self) -> String {
@@ -723,12 +726,21 @@ fn cells<'a>(
     result
 }
 
+/// コードのハイライトの計算を待ち、色を付けた表示行を作る。
 pub fn layout(document: &Document, width: usize, colors: bool) -> Vec<DisplayLine> {
-    layout_with_images(document, width, colors, &[])
+    let mut lines = layout_with_images(document, width, colors, &[]);
+    document.highlights.wait();
+    for line in &mut lines {
+        if let (Some(styled), _) = document.highlights.apply(line) {
+            line.line = styled;
+        }
+    }
+    lines
 }
 
 /// `images` の範囲の画像を、前後の本文から分けた行にして表示行を作る。範囲は
-/// `Document::local_images` が返す最上位の段落・見出しの画像に限る。
+/// `Document::local_images` が返す最上位の段落・見出しの画像に限る。コードのハイライトは
+/// 別スレッドへ依頼するだけで待たず、色は描画時に `HighlightCache::apply` で重ねる。
 pub fn layout_with_images(
     document: &Document,
     width: usize,
@@ -753,16 +765,16 @@ pub fn layout_with_images(
         }
         // 装飾境界をまたぐ書記素を維持し、通常文字のCellはこの文字列を借用する。
         let rendered: String = line.runs.iter().map(|r| r.text.as_str()).collect();
-        let mut data = cells(&line, document, colors, &rendered);
-        if colors && let Some(language) = &line.language {
-            let tokens = document
-                .highlights
-                .get_or_compute((line.source, rendered.len()), || {
-                    highlight(&rendered, language)
-                });
-            apply_highlight(&mut data, &tokens);
-        }
-        wrap(&line, &data, width, &mut result);
+        let data = cells(&line, document, colors, &rendered);
+        let code = match &line.language {
+            Some(language) if colors => {
+                let key = (line.source, rendered.len());
+                document.highlights.request(key, &rendered, language);
+                Some(key)
+            }
+            _ => None,
+        };
+        wrap(&line, &data, width, code, &mut result);
     }
     result
 }
@@ -785,21 +797,14 @@ fn rule_line(line: &LogicalLine, width: usize) -> DisplayLine {
     )
 }
 
-/// ソース対応を作ってから装飾だけを重ねる。引用・字下げでコードの元位置が飛んでも対応を壊さない。
-fn apply_highlight(data: &mut [Cell], tokens: &[Token]) {
-    let mut token = 0;
-    for cell in data {
-        while token + 1 < tokens.len() && tokens[token].end <= cell.offset {
-            token += 1;
-        }
-        if let Some(highlight) = tokens.get(token) {
-            cell.style = highlight.style;
-        }
-    }
-}
-
-/// 論理行の書記素セルを本文幅で表示行へ折り返す。
-fn wrap(line: &LogicalLine, data: &[Cell], width: usize, result: &mut Vec<DisplayLine>) {
+/// 論理行の書記素セルを本文幅で表示行へ折り返す。`code` はハイライトするコードブロック。
+fn wrap(
+    line: &LogicalLine,
+    data: &[Cell],
+    width: usize,
+    code: Option<Key>,
+    result: &mut Vec<DisplayLine>,
+) {
     let mut start = 0;
     let mut first = true;
     let mut code_continuation = false;
@@ -833,6 +838,7 @@ fn wrap(line: &LogicalLine, data: &[Cell], width: usize, result: &mut Vec<Displa
             prefix,
             &data[start..end],
             source_start..source_end.max(source_start),
+            code,
         ));
         first = false;
         if hard {
@@ -890,13 +896,33 @@ fn break_point(data: &[Cell], start: usize, available: usize, code: bool) -> (us
     (end, next, hard)
 }
 
-fn display_line(prefix: String, cells: &[Cell], source: Range<usize>) -> DisplayLine {
+fn display_line(
+    prefix: String,
+    cells: &[Cell],
+    source: Range<usize>,
+    code: Option<Key>,
+) -> DisplayLine {
     let mut byte_offset = prefix.len();
     let mut mappings = Vec::new();
     let mut destinations = Vec::new();
+    let mut runs: Vec<CodeRun> = Vec::new();
+    // 直前のセルが表示行と論理行で同じ文字列なら、その終端（表示行の位置、論理行の位置）。
+    let mut verbatim_end = None;
     let mut spans = vec![Span::raw(prefix)];
     for c in cells {
         let text = byte_offset..byte_offset + c.text.len();
+        if code.is_some() {
+            // タブの展開・制御文字の置換は表示行の文字列だけが変わる。
+            let verbatim = matches!(c.text, Cow::Borrowed(_));
+            if !(verbatim && verbatim_end == Some((text.start, c.offset))) {
+                runs.push(CodeRun {
+                    text: text.start,
+                    rendered: c.offset,
+                    verbatim,
+                });
+            }
+            verbatim_end = verbatim.then_some((text.end, c.offset + c.text.len()));
+        }
         if let Some((id, target)) = &c.destination {
             destinations.push(Destination {
                 text: text.clone(),
@@ -918,6 +944,7 @@ fn display_line(prefix: String, cells: &[Cell], source: Range<usize>) -> Display
     }
     DisplayLine {
         destinations,
+        code: code.map(|key| CodeOffsets { key, runs }),
         ..DisplayLine::new(Line::from(spans), source, mappings)
     }
 }

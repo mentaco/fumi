@@ -1,6 +1,7 @@
 use crate::{
     document::Document,
     graphics::ViewState,
+    highlight::Waiting,
     layout::{
         DisplayLine, Mapping, anchored_row, layout, layout_with_images, search_segments,
         truncate_middle,
@@ -17,7 +18,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::Paragraph,
 };
-use std::{collections::HashMap, sync::Arc};
+use std::{cell::RefCell, collections::HashMap, sync::Arc};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -137,6 +138,8 @@ pub struct App {
     height: u16,
     colors: bool,
     name: String,
+    /// 最後に描いた画面の、コードの色がまだ確定していない本文の行。
+    highlight_waiting: RefCell<Vec<Waiting>>,
 }
 
 impl App {
@@ -157,7 +160,15 @@ impl App {
             height: 0,
             colors,
             name: sanitize(name),
+            highlight_waiting: RefCell::default(),
         }
+    }
+
+    /// 最後に描いた画面で色が未確定だったコードの行に、その後の計算で色が付いたか。
+    /// 真なら描き直す。
+    pub fn highlight_progressed(&self) -> bool {
+        let waiting = self.highlight_waiting.borrow();
+        !waiting.is_empty() && self.body.document.highlights.advanced(&waiting)
     }
 
     /// 本文の文書。
@@ -728,16 +739,22 @@ impl App {
         }
     }
 
+    /// 本文の表示行に、確定したコードの色と検索の一致を重ねる。
     fn highlight_line(&self, line: &DisplayLine) -> Line<'static> {
+        let (code, waiting) = self.body.document.highlights.apply(line);
+        if let Some(waiting) = waiting {
+            self.highlight_waiting.borrow_mut().push(waiting);
+        }
+        let base = code.unwrap_or_else(|| line.line.clone());
         if self.search.matches.is_empty() {
-            return line.line.clone();
+            return base;
         }
         // 対応表も書記素も表示行の先頭から順に並ぶため、位置を進めながら照合する。
         let mut mappings = line.mappings.iter().peekable();
         let mut destinations = line.destinations.iter().peekable();
         let mut spans = Vec::new();
         let mut offset = 0;
-        for span in &line.line.spans {
+        for span in &base.spans {
             for g in span.content.graphemes(true) {
                 while mappings.next_if(|m| m.text.end <= offset).is_some() {}
                 while destinations.next_if(|d| d.text.end <= offset).is_some() {}
@@ -870,6 +887,7 @@ impl App {
             self.height - 1,
         );
         let pane = self.active();
+        self.highlight_waiting.borrow_mut().clear();
         let text: Vec<_> = pane
             .lines
             .iter()

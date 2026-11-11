@@ -669,3 +669,36 @@ fn empty_table_centering_respects_unicode_cell_width_and_one_column() {
         assert!(lines.iter().all(|line| line.text().width() == width));
     }
 }
+
+#[test]
+fn code_colors_arrive_after_the_first_frame_and_combine_with_search() {
+    let code = "let value = compute(1, \"text\"); // comment\n".repeat(2000);
+    let mut app = app(&format!("```rust\n{code}```\n"));
+    let mut terminal = Terminal::new(TestBackend::new(40, 8)).unwrap();
+    let colored = |terminal: &Terminal<TestBackend>| {
+        let buffer = terminal.backend().buffer();
+        // コードの1行目と、画面の下の方の行（折り返しの印のない行）の先頭に色が付いたか。
+        buffer[(1, 1)].fg != ratatui::style::Color::Reset
+            && buffer[(1, 5)].fg != ratatui::style::Color::Reset
+    };
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    terminal.draw(|f| assert!(app.draw(f))).unwrap();
+    while !colored(&terminal) {
+        assert!(std::time::Instant::now() < until, "色が付かない");
+        if app.highlight_progressed() {
+            terminal.draw(|f| assert!(app.draw(f))).unwrap();
+        } else {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+    // 画面の行の色が確定したら、残りの計算が進んでも描き直しを求めない。
+    terminal.draw(|f| assert!(app.draw(f))).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    assert!(!app.highlight_progressed());
+    let before = terminal.backend().buffer()[(1, 1)].fg;
+    query(&mut app, "let");
+    terminal.draw(|f| assert!(app.draw(f))).unwrap();
+    let cell = &terminal.backend().buffer()[(1, 1)];
+    assert_eq!(cell.fg, before);
+    assert!(cell.modifier.contains(Modifier::REVERSED));
+}

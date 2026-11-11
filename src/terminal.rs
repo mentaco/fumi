@@ -294,6 +294,8 @@ pub fn run(
         {
             dirty |= app.set_images(views, Status::Pending);
         }
+        // コードの色は別スレッドで確定していく。画面に未確定の行があるときだけ描き直す。
+        dirty |= app.highlight_progressed();
         if dirty && last_draw.elapsed() >= FRAME {
             frames.begin(&mut terminal)?;
             let prepared = kitty.prepare(&app.view_state(), terminal.backend_mut());
