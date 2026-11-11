@@ -505,7 +505,8 @@ macOS 27.2（26B123）arm64、Python 3.9.6で、debugビルドを使って確認
 
 - Rustテスト92件成功（PTY専用1件はignore）。`src/highlight.rs`に3件（途中結果では確定した範囲だけに色を付け、行の先頭を超えるまで描き直しを求めないこと、タブ・制御文字を含む行の色、文書を捨てると最後まで計算せずに止まること）、`tests/v1.rs`に1件（`App`で初回描画の後に色が届き、画面の行が確定したら描き直しを求めず、検索の強調と色が重なること）を加えた。リサイズしても新しく読み込んだ文書と同じ色になることは既存のテストで確かめている。
 - fmt、Clippy（全target・全feature、警告をエラー扱い）成功。`tests/pty_smoke.py` 14グループ、`tests/pty_v1.py` 25グループ、`tests/pty_tmux.py`（実tmux 3.8）6グループ、`tests/pty_v2.py` 15グループが成功した。
-- 環境はmacOS 27.2（Apple M3）、Rust 1.92.0。Rust 1.88.0での確認とGitHub Actionsでの確認はしていない。
+- 環境はmacOS 27.2（Apple M3）、Rust 1.92.0。
+- コミット`ca5bfce`（修正）と`fdb67d9`（記録）をmainへプッシュし、GitHub Actionsの[実行42977265211](https://github.com/mentaco/fumi/actions/runs/42977265211)で4ジョブ（`test`・`msrv`のubuntu-latest・macos-latest）すべて成功した。Rust 1.88.0（`msrv`）を含む両OSでRustテスト92件が成功（1件ignore）し、`test`の両OSでPTY検証60グループ（smoke 14、v1 25、tmux 6、v2 15）が成功した。`RETRY`は0回。`test`の所要時間はmacOSで約3分35秒、Ubuntuで約1分52秒。
 
 ### 測定
 
