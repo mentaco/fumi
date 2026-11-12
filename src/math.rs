@@ -329,10 +329,12 @@ fn inline_image(
     let row = width as usize * 4;
     // 実際に描いた画素で範囲を決める。文字の輪郭はフォントの高さ・深さの値から1画素ほど
     // はみ出し得るため。
+    // 各画素の4バイト目（アルファ）だけを見る。
     let inked = |y: &usize| {
-        rgba[y * row..(y + 1) * row]
-            .chunks_exact(4)
-            .any(|p| p[3] > 0)
+        rgba[y * row + 3..(y + 1) * row]
+            .iter()
+            .step_by(4)
+            .any(|&alpha| alpha > 0)
     };
     let mut offset = (target - baseline).round() as isize;
     if let (Some(first), Some(last)) = (

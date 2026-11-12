@@ -61,9 +61,11 @@ fn opaque_rows(png: &[u8]) -> (u32, u32) {
     let info = reader.next_frame(&mut data).unwrap();
     let rows: Vec<u32> = (0..info.height)
         .filter(|&y| {
-            data[(y * info.width * 4) as usize..((y + 1) * info.width * 4) as usize]
-                .chunks_exact(4)
-                .any(|p| p[3] > 0)
+            // 各画素の4バイト目（アルファ）だけを見る。
+            data[(y * info.width * 4 + 3) as usize..((y + 1) * info.width * 4) as usize]
+                .iter()
+                .step_by(4)
+                .any(|&alpha| alpha > 0)
         })
         .collect();
     (rows[0], *rows.last().unwrap())
