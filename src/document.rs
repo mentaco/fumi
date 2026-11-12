@@ -251,6 +251,31 @@ impl Document {
         self.display_math().next().is_some()
     }
 
+    /// 画像にできるインライン数式の要素と、`$` 区切りを除いたTeX（仕様7.4節）。
+    /// 表のセルは文字数で列幅を決めるため対象外とし、TeX表示を続ける。
+    pub fn inline_math(&self) -> Vec<(&Node, &str)> {
+        fn visit<'a>(nodes: &'a [Node], out: &mut Vec<(&'a Node, &'a str)>) {
+            for node in nodes {
+                match &node.kind {
+                    Kind::Math {
+                        raw,
+                        display: false,
+                    } => {
+                        let tex = raw.strip_prefix('$').and_then(|r| r.strip_suffix('$'));
+                        if let Some(tex) = tex.filter(|tex| !tex.is_empty()) {
+                            out.push((node, tex));
+                        }
+                    }
+                    Kind::Element(Tag::Table(_)) => {}
+                    _ => visit(&node.children, out),
+                }
+            }
+        }
+        let mut found = Vec::new();
+        visit(&self.nodes, &mut found);
+        found
+    }
+
     /// 画像として表示するローカル画像の範囲と参照先のパス（仕様8.3節）。対象は最上位の段落・
     /// 見出しの画像で、強調等の中も含む。リンク・リスト・引用・表の中は代替テキストのまま。
     pub fn local_images(&self) -> Vec<(Range<usize>, PathBuf)> {

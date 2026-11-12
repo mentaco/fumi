@@ -3,8 +3,8 @@ use crate::{
     graphics::ViewState,
     highlight::Waiting,
     layout::{
-        DisplayLine, Mapping, anchored_row, layout, layout_with_images, search_segments,
-        truncate_middle,
+        DisplayLine, InlineSize, Mapping, anchored_row, layout, layout_with_images,
+        search_segments, truncate_middle,
     },
     math::{Status, View},
     search::{self, Search, Segment},
@@ -35,7 +35,7 @@ const WHEEL_LINES: usize = 3;
 /// ヘルプの本文。操作の数値は定数から埋め込み、実装との食い違いを防ぐ。
 fn help_text() -> String {
     format!(
-        "# fumi 操作一覧\n\n読み取り専用Markdownビューア（v1）\n\nj / ↓ : 1表示行下\nk / ↑ : 1表示行上\nCtrl+d / Ctrl+u : 半画面下 / 上\nCtrl+f / PageDown : 1画面下（1行重複）\nCtrl+b / PageUp : 1画面上（1行重複）\ngg / Home : 先頭\nG / End : 末尾\n? : ヘルプを開閉\nR : 文書を再読込（ファイル入力のみ）\nq : ツールを終了（ヘルプ表示中も同じ）\nEsc : 検索語・ハイライトを解除、ヘルプから本文へ戻る\n/ : 検索入力（最大{SEARCH_LIMIT}書記素）\nn / N : 次 / 前の一致（循環）\nホイール : {WHEEL_LINES}表示行上下\n検索中 Enter : 確定、Esc / Ctrl+c : 取消\n検索中 Backspace : 1書記素削除、Ctrl+u : 全消去\nCtrl+c : 割り込み終了（130）\nCtrl+z : 中断、fgで復帰\n\nヘルプでも移動できます。本文位置は変わりません。\nサイズ不足中はq / Ctrl+cで終了できます。\n\nfumi - : パイプ・リダイレクトの標準入力を表示\n--plain : 端末の画像対応の確認や画像を使わないテキストTUI\n--color auto|always|never : 色の指定\n--graphics auto|off|kitty : 数式画像の方式\n--watch : ファイルの変更を監視して自動で再読込\n\n対応端末のブロック数式は画像、それ以外はTeXソースを表示します。\n対応端末では、最上位の段落・見出しにあるローカルのPNG/JPEG画像を表示します。\nそれ以外のMarkdown画像は代替テキストと参照先を表示します。\nリンクを開く操作はありません。"
+        "# fumi 操作一覧\n\n読み取り専用Markdownビューア（v1）\n\nj / ↓ : 1表示行下\nk / ↑ : 1表示行上\nCtrl+d / Ctrl+u : 半画面下 / 上\nCtrl+f / PageDown : 1画面下（1行重複）\nCtrl+b / PageUp : 1画面上（1行重複）\ngg / Home : 先頭\nG / End : 末尾\n? : ヘルプを開閉\nR : 文書を再読込（ファイル入力のみ）\nq : ツールを終了（ヘルプ表示中も同じ）\nEsc : 検索語・ハイライトを解除、ヘルプから本文へ戻る\n/ : 検索入力（最大{SEARCH_LIMIT}書記素）\nn / N : 次 / 前の一致（循環）\nホイール : {WHEEL_LINES}表示行上下\n検索中 Enter : 確定、Esc / Ctrl+c : 取消\n検索中 Backspace : 1書記素削除、Ctrl+u : 全消去\nCtrl+c : 割り込み終了（130）\nCtrl+z : 中断、fgで復帰\n\nヘルプでも移動できます。本文位置は変わりません。\nサイズ不足中はq / Ctrl+cで終了できます。\n\nfumi - : パイプ・リダイレクトの標準入力を表示\n--plain : 端末の画像対応の確認や画像を使わないテキストTUI\n--color auto|always|never : 色の指定\n--graphics auto|off|kitty : 数式画像の方式\n--inline-math text|image : インライン数式の表示（imageは対応端末で画像）\n--watch : ファイルの変更を監視して自動で再読込\n\n対応端末のブロック数式は画像、それ以外はTeXソースを表示します。\nインライン数式は--inline-math imageのときだけ画像にします。\n対応端末では、最上位の段落・見出しにあるローカルのPNG/JPEG画像を表示します。\nそれ以外のMarkdown画像は代替テキストと参照先を表示します。\nリンクを開く操作はありません。"
     )
 }
 
@@ -128,6 +128,8 @@ pub struct App {
     search: Search,
     graphics_status: Status,
     graphics_active: bool,
+    /// インライン数式も画像にするか（`--inline-math image`、仕様7.4節）。
+    inline_math: bool,
     warning: String,
     /// 次のキー操作まで表示するお知らせ。再読込の結果等。
     notice: String,
@@ -151,6 +153,7 @@ impl App {
             search: Search::default(),
             graphics_status: Default::default(),
             graphics_active: false,
+            inline_math: false,
             warning: String::new(),
             notice: String::new(),
             help_visible: false,
@@ -169,6 +172,11 @@ impl App {
     pub fn highlight_progressed(&self) -> bool {
         let waiting = self.highlight_waiting.borrow();
         !waiting.is_empty() && self.body.document.highlights.advanced(&waiting)
+    }
+
+    /// インライン数式も画像にするかを設定する。画像表示の開始前に呼ぶ。
+    pub fn set_inline_math(&mut self, enabled: bool) {
+        self.inline_math = enabled;
     }
 
     /// 本文の文書。
@@ -294,13 +302,44 @@ impl App {
         } else {
             Vec::new()
         };
-        let lines = layout_with_images(&self.body.document, width, self.colors, &images);
+        let lines = layout_with_images(
+            &self.body.document,
+            width,
+            self.colors,
+            &images,
+            &self.inline_sizes(),
+        );
         self.overlay_images(lines)
     }
 
+    /// 画像表示中に、画像ができたインライン数式の大きさ。
+    fn inline_sizes(&self) -> HashMap<usize, InlineSize> {
+        if !self.graphics_active || !self.inline_math {
+            return HashMap::new();
+        }
+        self.body
+            .document
+            .inline_math()
+            .into_iter()
+            .filter_map(|(node, _)| match self.doc.views.get(&node.source.start) {
+                Some(View::Ready(image)) => Some((
+                    node.source.start,
+                    InlineSize {
+                        columns: image.columns,
+                        rows: image.rows,
+                        above: image.above,
+                    },
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// 画像にする数式・ローカル画像があるか。
-    fn has_graphics_targets(&self) -> bool {
-        self.body.document.has_display_math() || !self.body.document.local_images().is_empty()
+    pub fn has_graphics_targets(&self) -> bool {
+        self.body.document.has_display_math()
+            || !self.body.document.local_images().is_empty()
+            || (self.inline_math && !self.body.document.inline_math().is_empty())
     }
 
     /// 本文の文書を差し替える（仕様3.1節）。文書の内容から作った状態を捨てて世代を進め、
@@ -768,10 +807,13 @@ impl App {
                     .copied();
                 let hit = self.search.hit(source, destination);
                 let mut style = span.style;
-                if hit.current {
+                // 数式の画像の下の空白を反転すると、文字色の背景に文字色の数式が重なって
+                // 読めなくなる。画像の下は一致の種類によらず下線で示す。
+                let formula = line.formulas.iter().any(|f| f.text.contains(&offset));
+                if hit.current && !formula {
                     style = style.add_modifier(Modifier::REVERSED);
                 }
-                if hit.other {
+                if hit.other || (hit.current && formula) {
                     style = style.add_modifier(Modifier::UNDERLINED);
                 }
                 spans.push(Span::styled(g.to_string(), style));

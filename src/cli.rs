@@ -9,6 +9,16 @@ pub enum GraphicsMode {
     Kitty,
 }
 
+/// インライン数式の表示方法（仕様7.4節）。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub enum InlineMath {
+    /// TeXソースを表示する。
+    #[default]
+    Text,
+    /// 数式画像を表示できる端末では画像にする。
+    Image,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
 pub enum ColorMode {
     #[default]
@@ -39,6 +49,9 @@ pub struct Cli {
     /// 端末画像の方式を指定する（plain指定時は無効）
     #[arg(long, value_enum, default_value = "auto")]
     pub graphics: GraphicsMode,
+    /// インライン数式の表示方法（imageは数式画像を表示できる端末だけ）
+    #[arg(long, value_enum, default_value = "text")]
+    pub inline_math: InlineMath,
     /// ファイルの変更を監視して自動で再読込する（ファイル入力のみ）
     #[arg(long)]
     pub watch: bool,

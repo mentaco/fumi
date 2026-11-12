@@ -417,7 +417,7 @@ mod tests {
     fn partial_results_color_only_the_covered_prefix() {
         let code = "fn a() {}\nfn b() {}";
         let doc = Document::parse(format!("```rust\n{code}\n```"));
-        let lines = layout_with_images(&doc, 80, true, &[]);
+        let lines = layout_with_images(&doc, 80, true, &[], &Default::default());
         doc.highlights.wait();
         let marker = Style::default().fg(Color::Rgb(1, 2, 3));
         // 1行目だけ確定した状態にして、2行目は元の装飾のまま未確定と報告されることを確かめる。

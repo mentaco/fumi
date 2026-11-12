@@ -33,6 +33,7 @@ fn request(tex: &str) -> Request {
         cell: (10, 20),
         foreground: [235; 3],
         monochrome: false,
+        inline: false,
     }
 }
 
@@ -413,6 +414,7 @@ fn several_formulas_keep_document_order_with_images_and_reasons() {
         height: 40,
         columns: 3,
         rows: 2,
+        above: 0,
     });
     app.enable_graphics();
     app.set_images(

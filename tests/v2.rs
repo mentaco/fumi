@@ -194,6 +194,7 @@ fn replacing_discards_math_results_of_the_old_document() {
             cell: (10, 20),
             foreground: [235; 3],
             monochrome: false,
+            inline: false,
         })
         .unwrap(),
     );

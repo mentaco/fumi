@@ -11,6 +11,7 @@ fumi [OPTIONS] -               # 標準入力から読む
       --plain                 端末の画像対応の確認・画像転送・拡大文字を無効化
       --color <MODE>          auto / always / never（既定: auto）
       --graphics <MODE>       auto / off / kitty（既定: auto）
+      --inline-math <MODE>    text / image（既定: text）
       --watch                 ファイルの変更を監視して自動で再読込（ファイル入力のみ）
   -h, --help                  使い方を表示して終了
   -V, --version               バージョンを表示して終了

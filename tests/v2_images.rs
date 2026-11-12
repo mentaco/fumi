@@ -332,7 +332,13 @@ fn displayed_images_split_the_paragraph_into_their_own_lines() {
         .map(|(r, _)| r)
         .collect();
     assert_eq!(
-        texts(&layout_with_images(&document, 40, false, &ranges)),
+        texts(&layout_with_images(
+            &document,
+            40,
+            false,
+            &ranges,
+            &Default::default()
+        )),
         [
             "前の文",
             "[image: 猫] <cat.png>",
@@ -354,7 +360,13 @@ fn displayed_images_split_the_paragraph_into_their_own_lines() {
         .map(|(r, _)| r)
         .collect();
     assert_eq!(
-        texts(&layout_with_images(&document, 40, false, &ranges)),
+        texts(&layout_with_images(
+            &document,
+            40,
+            false,
+            &ranges,
+            &Default::default()
+        )),
         [
             "[image: a] <a.png>",
             "[image: b] <b.png>",
@@ -372,6 +384,7 @@ fn image(rows: usize) -> Arc<fumi::math::Image> {
         height: 20 * rows as u32,
         columns: 1,
         rows,
+        above: 0,
     })
 }
 

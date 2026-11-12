@@ -71,8 +71,12 @@ pub fn worker() -> u8 {
             .map_err(|_| "入力失敗")?;
         let key: Key = serde_json::from_slice(&input).map_err(|_| "入力形式")?;
         let image = key.render()?;
-        io::stdout()
-            .write_all(&image.png)
+        // 先頭の1バイトは本文の行より上にはみ出す行数（インライン数式）。続けてPNG。
+        let above = u8::try_from(image.above).map_err(|_| "行数上限")?;
+        let mut output = io::stdout();
+        output
+            .write_all(&[above])
+            .and_then(|()| output.write_all(&image.png))
             .map_err(|_| "出力失敗".into())
     })();
     if let Err(message) = result {
@@ -129,14 +133,18 @@ impl Job {
         Some(if expired {
             View::Failed(format!("{}秒タイムアウト", JOB_TIMEOUT.as_secs()))
         } else if matches!(status, Ok(Some(s)) if s.success())
-            && let Some((width, height)) = png_dimensions(&self.bytes)
+            && let Some((&above, png)) = self.bytes.split_first()
+            && let Some((width, height)) = png_dimensions(png)
+            && let rows = height as usize / usize::from(cell.1)
+            && usize::from(above) < rows.max(1)
         {
             View::Ready(Arc::new(Image {
                 columns: width as usize / usize::from(cell.0),
-                rows: height as usize / usize::from(cell.1),
+                rows,
                 width,
                 height,
-                png: std::mem::take(&mut self.bytes),
+                png: self.bytes.split_off(1),
+                above: usize::from(above),
             }))
         } else {
             View::Failed(self.reason())
@@ -262,8 +270,12 @@ impl Cache {
 
 /// 画像にする要素。生成要求は本文幅と端末の能力から作る。
 enum Target {
-    Math(String),
-    Picture { path: PathBuf, stamp: Option<Stamp> },
+    /// TeXと、インライン数式か。
+    Math(String, bool),
+    Picture {
+        path: PathBuf,
+        stamp: Option<Stamp>,
+    },
 }
 
 pub struct Manager {
@@ -271,6 +283,8 @@ pub struct Manager {
     generation: u64,
     /// 相対参照の画像の基準ディレクトリ。
     base: PathBuf,
+    /// インライン数式も画像にするか（`--inline-math image`）。
+    inline_math: bool,
     /// 画像にする要素のソース範囲。文書の順に並ぶ。
     targets: Vec<(Range<usize>, Target)>,
     /// 各要素の現在の本文幅での生成要求。生成できなければその理由。
@@ -286,12 +300,14 @@ impl Manager {
     pub fn new(
         document: &Document,
         base: &Path,
+        inline_math: bool,
         generation: u64,
         capabilities: Capabilities,
     ) -> Self {
         let mut manager = Self {
             generation,
             base: base.into(),
+            inline_math,
             targets: Vec::new(),
             keys: Vec::new(),
             width: None,
@@ -308,8 +324,16 @@ impl Manager {
     fn set_targets(&mut self, document: &Document) {
         let mut targets: Vec<_> = document
             .display_math()
-            .map(|(node, tex)| (node.source.clone(), Target::Math(tex.into())))
+            .map(|(node, tex)| (node.source.clone(), Target::Math(tex.into(), false)))
             .collect();
+        if self.inline_math {
+            targets.extend(
+                document
+                    .inline_math()
+                    .into_iter()
+                    .map(|(node, tex)| (node.source.clone(), Target::Math(tex.into(), true))),
+            );
+        }
         for (source, path) in document.local_images() {
             let path = picture::resolve(&self.base, &path);
             let stamp = reload::stamp(&path);
@@ -347,7 +371,7 @@ impl Manager {
     fn key(&self, target: &Target, width: usize) -> Result<Key, String> {
         let cell = self.capabilities.cell;
         match target {
-            Target::Math(tex) => {
+            Target::Math(tex, inline) => {
                 if tex.len() > MAX_TEX {
                     return Err("16 KiB上限".into());
                 }
@@ -359,6 +383,7 @@ impl Manager {
                     cell,
                     foreground,
                     monochrome: self.capabilities.monochrome,
+                    inline: *inline,
                 }))
             }
             Target::Picture { path, stamp } => Ok(Key::Picture(picture::Request {
@@ -385,29 +410,49 @@ impl Manager {
         }
         let (top, rows, lines) = (view.top, view.rows, view.lines);
         let range = top.saturating_sub(rows)..(top + rows * 2).min(lines.len());
-        let mut targets: Vec<_> =
-            self.targets
-                .iter()
-                .enumerate()
-                .filter_map(|(index, (source, _))| {
-                    if !lines[range.clone()].iter().any(|line| {
-                        line.source.start < source.end && source.start <= line.source.end
-                    }) {
-                        return None;
-                    }
-                    let row = anchored_row(lines, source.start);
-                    range.contains(&row).then(|| {
-                        (
-                            index,
-                            if row >= top && row < top + rows {
-                                (0, row - top)
-                            } else {
-                                (1, row.abs_diff(top))
-                            },
-                        )
-                    })
+        let window = &lines[range.clone()];
+        // インライン数式の多い文書でも、範囲の表示行のソースに重なり得る要素だけを調べる。
+        // 要素は開始位置の順に並ぶ（画像の代替テキスト内の数式のように入れ子になり得るため、
+        // 終了位置の順は前提にしない）。
+        let (Some(low), Some(high)) = (
+            window.iter().map(|line| line.source.start).min(),
+            window.iter().map(|line| line.source.end).max(),
+        ) else {
+            return Vec::new();
+        };
+        let last = self
+            .targets
+            .partition_point(|(source, _)| source.start <= high);
+        let before = range.start.checked_sub(1).map(|i| &lines[i]);
+        let mut targets: Vec<_> = self.targets[..last]
+            .iter()
+            .enumerate()
+            .filter(|(_, (source, _))| source.end >= low)
+            .filter_map(|(index, (source, _))| {
+                if !window
+                    .iter()
+                    .any(|line| line.source.start < source.end && source.start <= line.source.end)
+                {
+                    return None;
+                }
+                // 範囲の直前の行が含むなら、範囲より前の行が要素の位置になる。
+                let row = window
+                    .iter()
+                    .position(|line| line.source.contains(&source.start))
+                    .filter(|_| !before.is_some_and(|l| l.source.contains(&source.start)))
+                    .map_or_else(|| anchored_row(lines, source.start), |i| range.start + i);
+                range.contains(&row).then(|| {
+                    (
+                        index,
+                        if row >= top && row < top + rows {
+                            (0, row - top)
+                        } else {
+                            (1, row.abs_diff(top))
+                        },
+                    )
                 })
-                .collect();
+            })
+            .collect();
         targets.sort_by_key(|(_, distance)| *distance);
         targets.into_iter().map(|(index, _)| index).collect()
     }
@@ -495,7 +540,9 @@ mod tests {
     use crate::app::App;
     /// 数式の生成要求。
     fn math_key(manager: &Manager, tex: &str, width: usize) -> Key {
-        manager.key(&Target::Math(tex.into()), width).unwrap()
+        manager
+            .key(&Target::Math(tex.into(), false), width)
+            .unwrap()
     }
     fn capabilities() -> Capabilities {
         Capabilities {
@@ -508,7 +555,7 @@ mod tests {
     #[test]
     fn cache_evicts_oldest_images_under_the_shared_budget() {
         let document = Document::parse(String::new());
-        let mut manager = Manager::new(&document, Path::new("."), 0, capabilities());
+        let mut manager = Manager::new(&document, Path::new("."), false, 0, capabilities());
         for i in 0..3 {
             let key = math_key(&manager, &format!("x_{i}"), 78);
             manager.cache.insert(
@@ -519,6 +566,7 @@ mod tests {
                     height: 2048,
                     columns: 1,
                     rows: 1,
+                    above: 0,
                 })),
             );
         }
@@ -542,6 +590,7 @@ mod tests {
         let mut manager = Manager::new(
             app.document(),
             Path::new("."),
+            false,
             app.generation(),
             capabilities(),
         );
@@ -568,6 +617,7 @@ mod tests {
         let mut manager = Manager::new(
             app.document(),
             Path::new("."),
+            false,
             app.generation(),
             capabilities(),
         );
@@ -613,6 +663,7 @@ mod tests {
         let mut manager = Manager::new(
             app.document(),
             Path::new("."),
+            false,
             app.generation(),
             capabilities(),
         );
@@ -654,6 +705,7 @@ mod tests {
         let mut manager = Manager::new(
             app.document(),
             directory.path(),
+            false,
             app.generation(),
             capabilities,
         );
@@ -688,7 +740,7 @@ mod tests {
         let document = Document::parse("![a](a.png)\n".into());
         let mut capabilities = capabilities();
         capabilities.transport = Transport::Tmux;
-        let mut manager = Manager::new(&document, Path::new("docs"), 0, capabilities);
+        let mut manager = Manager::new(&document, Path::new("docs"), false, 0, capabilities);
         manager.set_width(400);
         let Ok(Key::Picture(request)) = &manager.keys[0] else {
             panic!("画像の要求がない");

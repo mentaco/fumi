@@ -5,7 +5,10 @@ use crate::{
     math::{Image, View},
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
-use ratatui::{Frame, style::Color};
+use ratatui::{
+    Frame,
+    style::{Color, Modifier, Style},
+};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     hash::BuildHasher,
@@ -486,10 +489,8 @@ impl Kitty {
             return output.flush();
         };
         let mut visible = HashSet::new();
-        for (_, line) in view.screen_lines() {
-            let Some((source, _)) = line.image else {
-                continue;
-            };
+        let placements = view.screen_lines().flat_map(|(_, line)| line.placements());
+        for (source, _, _) in placements {
             if !visible.insert(source) {
                 continue;
             }
@@ -563,26 +564,30 @@ impl Kitty {
             return;
         }
         for (row, line) in view.screen_lines() {
-            let Some((source, offset)) = line.image else {
-                continue;
-            };
-            let Some((id, image)) = self.transferred.get(&source) else {
-                continue;
-            };
-            let Some(&row_mark) = diacritics::DIACRITICS.get(offset) else {
-                continue;
-            };
-            let high = diacritics::DIACRITICS[(id >> 24) as usize];
-            let color = Color::Rgb((id >> 16) as u8, (id >> 8) as u8, *id as u8);
-            for (column, &column_mark) in diacritics::DIACRITICS
-                .iter()
-                .take(image.columns.min(view.width))
-                .enumerate()
-            {
-                let symbol = format!("\u{10eeee}{row_mark}{column_mark}{high}");
-                let cell = &mut frame.buffer_mut()[(column as u16 + view.left, row as u16)];
-                cell.reset();
-                cell.set_symbol(&symbol).set_fg(color);
+            for (source, offset, start) in line.placements() {
+                let Some((id, image)) = self.transferred.get(&source) else {
+                    continue;
+                };
+                let Some(&row_mark) = diacritics::DIACRITICS.get(offset) else {
+                    continue;
+                };
+                let high = diacritics::DIACRITICS[(id >> 24) as usize];
+                let color = Color::Rgb((id >> 16) as u8, (id >> 8) as u8, *id as u8);
+                for (column, &column_mark) in diacritics::DIACRITICS
+                    .iter()
+                    .take(image.columns.min(view.width.saturating_sub(start)))
+                    .enumerate()
+                {
+                    let symbol = format!("\u{10eeee}{row_mark}{column_mark}{high}");
+                    let at = ((start + column) as u16 + view.left, row as u16);
+                    let cell = &mut frame.buffer_mut()[at];
+                    // 検索の一致の下線は、インライン数式の画像の下にも残す。
+                    let modifier = cell.modifier & Modifier::UNDERLINED;
+                    cell.reset();
+                    cell.set_symbol(&symbol)
+                        .set_fg(color)
+                        .set_style(Style::default().add_modifier(modifier));
+                }
             }
         }
     }
@@ -606,10 +611,11 @@ impl Kitty {
     }
     fn place(&mut self, view: &ViewState, output: &mut impl Write) -> io::Result<()> {
         let mut visible = HashSet::new();
-        for (row, line) in view.screen_lines() {
-            let Some((source, offset)) = line.image else {
-                continue;
-            };
+        let placements = view.screen_lines().flat_map(|(row, line)| {
+            line.placements()
+                .map(move |(source, offset, column)| (row, source, offset, column))
+        });
+        for (row, source, offset, column) in placements {
             if !visible.insert(source) {
                 continue;
             }
@@ -618,7 +624,12 @@ impl Kitty {
             };
             let remaining = image.rows.saturating_sub(offset).min(view.rows - row);
             let cell_height = image.height as usize / image.rows;
-            write!(output, "\x1b[{};{}H", row + 1, view.left + 1)?;
+            write!(
+                output,
+                "\x1b[{};{}H",
+                row + 1,
+                usize::from(view.left) + column + 1
+            )?;
             self.transport.control(
                 output,
                 &format!(
@@ -722,6 +733,7 @@ mod tests {
             height: 80,
             columns: 3,
             rows: 4,
+            above: 0,
         });
         app.set_images(
             HashMap::from([(source, View::Ready(image))]),
@@ -763,6 +775,78 @@ mod tests {
         assert!(!help.contains("a=p"));
         app.key(KeyEvent::from(KeyCode::Char('?')));
         assert!(frame(&mut kitty, &app).contains("a=p"));
+    }
+
+    #[test]
+    fn inline_formulas_are_placed_at_their_column_on_both_transports() {
+        let source = "前 $x$ 後\n\nnext\n\nmore\n\nlast\n";
+        let mut app = App::new(Document::parse(source.into()), "test.md", true);
+        app.set_inline_math(true);
+        app.resize(40, 5);
+        app.enable_graphics();
+        let formula = source.find('$').unwrap();
+        // 本文の行の上へ1行はみ出す2行の画像。
+        let image = Arc::new(Image {
+            png: vec![],
+            width: 20,
+            height: 40,
+            columns: 2,
+            rows: 2,
+            above: 1,
+        });
+        app.set_images(
+            HashMap::from([(formula, View::Ready(image.clone()))]),
+            Default::default(),
+        );
+        // 直接接続では、上の行の、余白1列と「前 」の3列の後へ置く。
+        let mut kitty = Kitty::new(Transport::Direct);
+        let mut bytes = Vec::new();
+        kitty.prepare(&app.view_state(), &mut bytes).unwrap();
+        kitty.draw(&app.view_state(), &mut bytes).unwrap();
+        let output = String::from_utf8(bytes).unwrap();
+        let id = kitty.transferred[&formula].0;
+        assert!(
+            output.contains(&format!(
+                "\x1b[1;5H\x1b_Ga=p,i={id},p=1,x=0,y=0,w=20,h=40,c=2,r=2,"
+            )),
+            "{output:?}"
+        );
+        // 上の行が画面外なら、本文の行から画像の2行目だけを置く。
+        app.scroll_to(1);
+        let mut bytes = Vec::new();
+        kitty.prepare(&app.view_state(), &mut bytes).unwrap();
+        kitty.draw(&app.view_state(), &mut bytes).unwrap();
+        let output = String::from_utf8(bytes).unwrap();
+        assert!(
+            output.contains(&format!(
+                "\x1b[1;5H\x1b_Ga=p,i={id},p=1,x=0,y=20,w=20,h=20,c=2,r=1,"
+            )),
+            "{output:?}"
+        );
+        // tmuxでは同じ列へ行ごとのプレースホルダーを描き、本文の文字は残す。
+        app.scroll_to(0);
+        let mut kitty = Kitty::new(Transport::Tmux);
+        kitty.transferred.insert(formula, (0x00010203, image));
+        let mut terminal = Terminal::new(TestBackend::new(40, 5)).unwrap();
+        let buffer = terminal
+            .draw(|f| {
+                assert!(app.draw(f));
+                kitty.render_placeholders(&app.view_state(), f);
+            })
+            .unwrap()
+            .buffer
+            .clone();
+        assert_eq!(
+            buffer[(4, 0)].symbol(),
+            "\u{10eeee}\u{0305}\u{0305}\u{0305}"
+        );
+        assert_eq!(
+            buffer[(5, 1)].symbol(),
+            "\u{10eeee}\u{030d}\u{030d}\u{0305}"
+        );
+        assert_eq!(buffer[(1, 1)].symbol(), "前");
+        assert_eq!(buffer[(7, 1)].symbol(), "後");
+        assert!(!buffer[(6, 1)].symbol().starts_with('\u{10eeee}'));
     }
 
     #[test]
@@ -811,6 +895,7 @@ mod tests {
             height: 80,
             columns: 3,
             rows: 4,
+            above: 0,
         });
         app.set_images(
             HashMap::from([(source, View::Ready(image.clone()))]),

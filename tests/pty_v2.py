@@ -3,6 +3,7 @@
 import base64
 import os
 from pathlib import Path
+import re
 import signal
 import struct
 import subprocess
@@ -11,7 +12,7 @@ import threading
 import time
 import zlib
 from pty_smoke import BINARY, Session, case
-from pty_v1 import V1, commands, respond, started_kitty
+from pty_v1 import V1, commands, respond, started_kitty, unwrapped
 
 DOCUMENT = "\ufeff# 標準入力\r\n\r\n本文の行\r\n".encode("utf-8")
 
@@ -354,6 +355,56 @@ def local_images():
             session.close()
 
 
+def inline_math_images():
+    """`--inline-math image` のときだけインライン数式を画像にし、本文の行の中へ置く（仕様7.4節）。"""
+    with tempfile.TemporaryDirectory() as directory:
+        document = Path(directory) / "inline.md"
+        document.write_text("前の文 $x_i$ と $\\frac{a}{b}$ 後の文\n", encoding="utf-8")
+        before = document.read_bytes()
+        # 既定（text）と plain では、インライン数式だけの文書で端末の画像対応を確かめない。
+        for args in [[document], ["--plain", "--inline-math", "image", document]]:
+            session = Session(args)
+            try:
+                session.pump(1.0)
+                assert b"a=q" not in session.data, args
+                assert any("前の文 $x_i$ と $\\frac{a}{b}$ 後の文" in row for row in session.screen())
+                session.send(b"q")
+                session.wait(0)
+            finally:
+                session.close()
+        session = image_session(["--inline-math", "image", document])
+        try:
+            until = time.monotonic() + 6
+            while sum(f.get(b"a") == b"p" for f, _ in commands(session)) < 2:
+                session.pump(.02)
+                assert time.monotonic() < until, session.visible()[-600:]
+            session.pump(.2)
+            pngs = transferred(session)
+            assert len(pngs) == 2, len(pngs)
+            sizes = sorted(struct.unpack(">II", data[16:24]) for data in pngs)
+            # どの式も本文の行の上へ1行足した2行（セル10×20の格子）に描く。
+            assert all(w % 10 == 0 and h == 40 for w, h in sizes), sizes
+            screen = session.screen()
+            text_row = next(i for i, row in enumerate(screen) if "前の文" in row)
+            row = screen[text_row]
+            # TeXは表示せず、画像の幅の空白を敷く。
+            assert "$" not in row and "後の文" in row, row
+            # 画像は本文の行の上の1行から、「前の文 」の後の列へ置く。
+            placed = [f for f, _ in commands(session) if f.get(b"a") == b"p"]
+            assert all(f.get(b"C") == b"1" for f in placed), placed
+            cursor = [m for m in re.finditer(rb"\x1b\[(\d+);(\d+)H\x1b_Ga=p", unwrapped(bytes(session.data)))]
+            columns = sorted(int(m[2]) for m in cursor)
+            # 余白1列＋「前の文 」の7セルの次（1始まりで9列目）。
+            assert columns[0] == 9, columns
+            # 配置は本文の行の1つ上の行から（画面の行は1始まり、`text_row` は0始まり）。
+            assert all(int(m[1]) == text_row for m in cursor), (text_row, [m[1] for m in cursor])
+            session.send(b"q")
+            session.wait(0)
+        finally:
+            session.close()
+        assert document.read_bytes() == before
+
+
 def images_from_stdin_use_the_working_directory():
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
@@ -509,5 +560,6 @@ if __name__ == "__main__":
     case("--watchの自動再読込・変化なし・削除と復旧", watch_reload)
     case("ローカル画像・相対参照・色なしでも元の色・対象外の画像・シンボリックリンクの基準", local_images)
     case("標準入力の画像は作業ディレクトリが基準", images_from_stdin_use_the_working_directory)
+    case("--inline-math imageのときだけインライン数式を本文の行の中で画像にする", inline_math_images)
     case("色の応答なしでも画像は表示・plainでは画像なし", images_without_colors_and_in_plain)
     case("再読込で書き換わった画像を読み直す", reload_reads_changed_images)

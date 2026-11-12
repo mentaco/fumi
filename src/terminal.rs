@@ -218,6 +218,8 @@ pub struct GraphicsOptions {
     pub mode: GraphicsMode,
     pub plain: bool,
     pub colors: bool,
+    /// インライン数式も画像にするか（`--inline-math image`）。
+    pub inline_math: bool,
     /// 相対参照の画像の基準ディレクトリ。ファイル入力ならその所在、標準入力なら作業ディレクトリ。
     pub image_base: std::path::PathBuf,
 }
@@ -416,6 +418,7 @@ fn configure_graphics(
             Ok(Some(Manager::new(
                 app.document(),
                 &options.image_base,
+                options.inline_math,
                 app.generation(),
                 capabilities,
             )))
@@ -431,7 +434,7 @@ fn configure_graphics(
 
 /// 画像にする数式・ローカル画像があるか。
 fn has_graphics(app: &App) -> bool {
-    app.document().has_display_math() || !app.document().local_images().is_empty()
+    app.has_graphics_targets()
 }
 
 fn install_panic_hook() {

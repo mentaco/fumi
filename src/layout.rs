@@ -9,7 +9,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
 };
-use std::{borrow::Cow, ops::Range};
+use std::{borrow::Cow, collections::HashMap, ops::Range};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -19,6 +19,8 @@ pub struct Run {
     pub style: Style,
     pub source: Range<usize>,
     pub destination: bool,
+    /// インライン数式の要素全体（区切りを含む）。画像にするときは一つのセルにまとめる。
+    pub math: bool,
 }
 
 #[derive(Default, Debug)]
@@ -59,12 +61,37 @@ pub struct Destination {
     pub target: Range<usize>,
 }
 
+/// 画像にしたインライン数式の、セル単位の大きさ（仕様7.4節）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InlineSize {
+    pub columns: usize,
+    pub rows: usize,
+    /// 本文の行より上にはみ出す行数。
+    pub above: usize,
+}
+
+/// 表示行に置くインライン数式の画像の一部。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Formula {
+    /// 要素のソース開始位置。
+    pub source: usize,
+    /// 本文の左端からの列。
+    pub column: usize,
+    /// この表示行に置く画像内の行。
+    pub row: usize,
+    /// 画像の下に敷く空白の、表示行の文字列内のバイト範囲。本文の行以外では空。
+    pub text: Range<usize>,
+}
+
 #[derive(Clone, Debug)]
 pub struct DisplayLine {
     pub line: Line<'static>,
     pub source: Range<usize>,
     pub mappings: Vec<Mapping>,
+    /// 行全体を使う画像（ブロック数式・ローカル画像）の要素のソース開始位置と、画像内の行。
     pub image: Option<(usize, usize)>,
+    /// 行内に置くインライン数式の画像。
+    pub formulas: Vec<Formula>,
     pub destinations: Vec<Destination>,
     /// ハイライトするコードの表示行の、論理行の文字列との対応。色は描画時に重ねる。
     pub code: Option<CodeOffsets>,
@@ -78,12 +105,20 @@ impl DisplayLine {
             source,
             mappings,
             image: None,
+            formulas: Vec::new(),
             destinations: Vec::new(),
             code: None,
         }
     }
     pub fn text(&self) -> String {
         self.line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+    /// この表示行に置く画像の要素のソース開始位置・画像内の行・本文の左端からの列。
+    pub fn placements(&self) -> impl Iterator<Item = (usize, usize, usize)> + '_ {
+        self.image
+            .map(|(source, row)| (source, row, 0))
+            .into_iter()
+            .chain(self.formulas.iter().map(|f| (f.source, f.row, f.column)))
     }
 }
 
@@ -95,6 +130,15 @@ struct Cell<'a> {
     width: usize,
     destination: Option<(usize, Range<usize>)>,
     offset: usize,
+    /// 画像にしたインライン数式。セルの幅は画像の列数で、途中で折り返さない。
+    formula: Option<(usize, InlineSize)>,
+}
+
+impl Cell<'_> {
+    /// 折返しの境界にできる空白。画像の下に敷く空白は含めない。
+    fn is_space(&self) -> bool {
+        self.formula.is_none() && self.text.chars().all(char::is_whitespace)
+    }
 }
 
 fn run(text: impl Into<String>, style: Style, range: Range<usize>) -> Run {
@@ -103,6 +147,7 @@ fn run(text: impl Into<String>, style: Style, range: Range<usize>) -> Run {
         style,
         source: range,
         destination: false,
+        math: false,
     }
 }
 
@@ -110,6 +155,13 @@ fn inline(nodes: &[Node], style: Style, out: &mut Vec<Run>) {
     for node in nodes {
         let r = node.source.clone();
         match &node.kind {
+            Kind::Math {
+                raw,
+                display: false,
+            } => out.push(Run {
+                math: true,
+                ..run(raw, style, r)
+            }),
             Kind::Text(s) | Kind::Html(s) | Kind::Math { raw: s, .. } => out.push(run(s, style, r)),
             Kind::Code(s) => out.push(run(
                 s,
@@ -253,6 +305,7 @@ fn split_images(runs: Vec<Run>, images: &[Range<usize>]) -> Vec<Run> {
                     style,
                     source: at..at,
                     destination: false,
+                    math: false,
                 });
             }
         }
@@ -644,11 +697,15 @@ impl<'a> RunSource<'a> {
     }
 }
 
+/// 論理行を書記素ごとのセルにする。`formulas` の数式は、列数が `max_columns` 以下なら
+/// 画像の幅の一つのセルにする。
 fn cells<'a>(
     line: &LogicalLine,
     document: &Document,
     colors: bool,
     rendered: &'a str,
+    formulas: &HashMap<usize, InlineSize>,
+    max_columns: usize,
 ) -> Vec<Cell<'a>> {
     let mut mappings = Vec::new();
     let mut offset = 0;
@@ -671,6 +728,27 @@ fn cells<'a>(
         if !colors {
             style.fg = None;
             style.bg = None;
+        }
+        let current = &mappings[first];
+        if current.run.math
+            && let Some(&size) = formulas
+                .get(&current.run.source.start)
+                .filter(|size| size.columns <= max_columns)
+        {
+            // 数式の文字列は表示せず、先頭の書記素の位置に画像の幅の空白を一つ置く。
+            if offset == current.start {
+                result.push(Cell {
+                    text: Cow::Owned(" ".repeat(size.columns)),
+                    style,
+                    source: current.run.source.clone(),
+                    width: size.columns,
+                    destination: None,
+                    offset,
+                    formula: Some((current.run.source.start, size)),
+                });
+                column += size.columns;
+            }
+            continue;
         }
         let mut source = None::<Range<usize>>;
         for m in &mut mappings[first..] {
@@ -695,6 +773,7 @@ fn cells<'a>(
                 width: 0,
                 destination: None,
                 offset,
+                formula: None,
             });
             column = 0;
             continue;
@@ -721,6 +800,7 @@ fn cells<'a>(
             width,
             destination,
             offset,
+            formula: None,
         });
     }
     result
@@ -728,7 +808,7 @@ fn cells<'a>(
 
 /// コードのハイライトの計算を待ち、色を付けた表示行を作る。
 pub fn layout(document: &Document, width: usize, colors: bool) -> Vec<DisplayLine> {
-    let mut lines = layout_with_images(document, width, colors, &[]);
+    let mut lines = layout_with_images(document, width, colors, &[], &HashMap::new());
     document.highlights.wait();
     for line in &mut lines {
         if let (Some(styled), _) = document.highlights.apply(line) {
@@ -739,13 +819,15 @@ pub fn layout(document: &Document, width: usize, colors: bool) -> Vec<DisplayLin
 }
 
 /// `images` の範囲の画像を、前後の本文から分けた行にして表示行を作る。範囲は
-/// `Document::local_images` が返す最上位の段落・見出しの画像に限る。コードのハイライトは
+/// `Document::local_images` が返す最上位の段落・見出しの画像に限る。`formulas` は画像にした
+/// インライン数式の大きさで、行に収まるものを本文中の画像にする。コードのハイライトは
 /// 別スレッドへ依頼するだけで待たず、色は描画時に `HighlightCache::apply` で重ねる。
 pub fn layout_with_images(
     document: &Document,
     width: usize,
     colors: bool,
     images: &[Range<usize>],
+    formulas: &HashMap<usize, InlineSize>,
 ) -> Vec<DisplayLine> {
     if width == 0 {
         return Vec::new();
@@ -765,7 +847,16 @@ pub fn layout_with_images(
         }
         // 装飾境界をまたぐ書記素を維持し、通常文字のCellはこの文字列を借用する。
         let rendered: String = line.runs.iter().map(|r| r.text.as_str()).collect();
-        let data = cells(&line, document, colors, &rendered);
+        // 字下げの後に残る幅を超える数式は、折り返せないためTeX表示のままにする。
+        let indent = outer_prefix(&line.prefix, width)
+            .width()
+            .max(outer_prefix(&line.continuation, width).width());
+        let max_columns = if line.code {
+            0
+        } else {
+            width.saturating_sub(indent)
+        };
+        let data = cells(&line, document, colors, &rendered, formulas, max_columns);
         let code = match &line.language {
             Some(language) if colors => {
                 let key = (line.source, rendered.len());
@@ -834,12 +925,16 @@ fn wrap(
             .map(|c| c.source.end)
             .max()
             .unwrap_or(source_start);
-        result.push(display_line(
-            prefix,
+        push_with_formulas(
+            display_line(
+                prefix,
+                &data[start..end],
+                source_start..source_end.max(source_start),
+                code,
+            ),
             &data[start..end],
-            source_start..source_end.max(source_start),
-            code,
-        ));
+            result,
+        );
         first = false;
         if hard {
             start = end + 1;
@@ -854,6 +949,43 @@ fn wrap(
     }
 }
 
+/// 表示行を加える。行内の数式の画像が上下にはみ出す分は、画像だけの行を前後に加える。
+fn push_with_formulas(line: DisplayLine, cells: &[Cell], result: &mut Vec<DisplayLine>) {
+    let sizes: Vec<_> = cells.iter().filter_map(|c| c.formula).collect();
+    let up = sizes.iter().map(|(_, s)| s.above).max().unwrap_or(0);
+    let down = sizes
+        .iter()
+        .map(|(_, s)| s.rows - 1 - s.above)
+        .max()
+        .unwrap_or(0);
+    // 本文の行からの相対位置 `offset` の行に置く画像の部分。
+    let extra = |offset: isize| {
+        let formulas = line
+            .formulas
+            .iter()
+            .zip(&sizes)
+            .filter_map(|(formula, (_, size))| {
+                let row = usize::try_from(size.above as isize + offset).ok()?;
+                (row < size.rows).then(|| Formula {
+                    row,
+                    text: 0..0,
+                    ..formula.clone()
+                })
+            })
+            .collect();
+        DisplayLine {
+            formulas,
+            ..DisplayLine::new(Line::raw(""), line.source.clone(), Vec::new())
+        }
+    };
+    for offset in (1..=up).rev() {
+        result.push(extra(-(offset as isize)));
+    }
+    let below: Vec<_> = (1..=down).map(|offset| extra(offset as isize)).collect();
+    result.push(line);
+    result.extend(below);
+}
+
 /// `start` から始まる表示行の終端 `end`、次の行の開始 `next`、改行で終わるかを返す。
 fn break_point(data: &[Cell], start: usize, available: usize, code: bool) -> (usize, usize, bool) {
     let mut end = start;
@@ -861,7 +993,7 @@ fn break_point(data: &[Cell], start: usize, available: usize, code: bool) -> (us
     let mut last_space = None;
     while end < data.len() && data[end].text != "\n" && used + data[end].width <= available {
         used += data[end].width;
-        if data[end].text.chars().all(char::is_whitespace) {
+        if data[end].is_space() {
             last_space = Some(end);
         }
         end += 1;
@@ -874,7 +1006,7 @@ fn break_point(data: &[Cell], start: usize, available: usize, code: bool) -> (us
         let space = last_space.filter(|&s| s > start).filter(|&s| {
             data[s + 1..]
                 .iter()
-                .take_while(|c| !c.text.chars().all(char::is_whitespace))
+                .take_while(|c| !c.is_space())
                 .map(|c| c.width)
                 .sum::<usize>()
                 <= available
@@ -884,7 +1016,7 @@ fn break_point(data: &[Cell], start: usize, available: usize, code: bool) -> (us
             next = space + 1;
         } else {
             // 空白がちょうど次の行に出る場合は通常文の折返し境界として消費する。
-            while next < data.len() && data[next].text == " " {
+            while next < data.len() && data[next].text == " " && data[next].is_space() {
                 next += 1;
             }
         }
@@ -908,9 +1040,20 @@ fn display_line(
     let mut runs: Vec<CodeRun> = Vec::new();
     // 直前のセルが表示行と論理行で同じ文字列なら、その終端（表示行の位置、論理行の位置）。
     let mut verbatim_end = None;
+    let mut column = prefix.width();
+    let mut formulas = Vec::new();
     let mut spans = vec![Span::raw(prefix)];
     for c in cells {
         let text = byte_offset..byte_offset + c.text.len();
+        if let Some((source, size)) = c.formula {
+            formulas.push(Formula {
+                source,
+                column,
+                row: size.above,
+                text: text.clone(),
+            });
+        }
+        column += c.width;
         if code.is_some() {
             // タブの展開・制御文字の置換は表示行の文字列だけが変わる。
             let verbatim = matches!(c.text, Cow::Borrowed(_));
@@ -944,6 +1087,7 @@ fn display_line(
     }
     DisplayLine {
         destinations,
+        formulas,
         code: code.map(|key| CodeOffsets { key, runs }),
         ..DisplayLine::new(Line::from(spans), source, mappings)
     }
@@ -967,7 +1111,7 @@ pub fn search_segments(document: &Document) -> Vec<Segment> {
                 .collect(),
         );
         let mut segment = Segment::default();
-        for cell in cells(&filtered, document, false, &rendered) {
+        for cell in cells(&filtered, document, false, &rendered, &HashMap::new(), 0) {
             if cell.text == "\n" {
                 if !segment.text.is_empty() {
                     result.push(segment);
