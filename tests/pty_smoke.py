@@ -442,8 +442,11 @@ def close_with_unread_output():
 
 
 def restoration_faults():
-    # cargo testで作成されたlibテスト実行ファイルを選ぶ。
-    for candidate in sorted(Path(BINARY).parent.joinpath("deps").glob("fumi-*"), key=lambda path: path.stat().st_mtime, reverse=True):
+    # cargo testで作成されたlibテスト実行ファイルを選ぶ。Cargoの版により
+    # deps/ か build/<パッケージ>/<ハッシュ>/out/ に置かれる（Rust 1.100.0以降は後者）。
+    target = Path(BINARY).parent
+    found = [*target.joinpath("deps").glob("fumi-*"), *target.glob("build/fumi/*/out/fumi-*")]
+    for candidate in sorted(found, key=lambda path: path.stat().st_mtime, reverse=True):
         if not candidate.is_file() or not os.access(candidate, os.X_OK):
             continue
         listed = subprocess.run([str(candidate), "--list"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
