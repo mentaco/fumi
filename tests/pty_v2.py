@@ -405,6 +405,49 @@ def inline_math_images():
         assert document.read_bytes() == before
 
 
+
+def inline_math_in_tables():
+    """既定では表のセルのインライン数式も画像にし、列幅を画像の幅で決める（仕様5節・7.4節）。"""
+    with tempfile.TemporaryDirectory() as directory:
+        document = Path(directory) / "table.md"
+        document.write_text("| 名前 | 式 |\n|---|---|\n| a | $x_i$ |\n", encoding="utf-8")
+        # --table-math text では表のセルの数式をTeXのまま表示し、表の数式しかない文書では
+        # 端末の画像対応を確かめない。
+        session = Session(["--table-math", "text", document])
+        try:
+            session.pump(1.0)
+            assert b"a=q" not in session.data
+            assert any("│ a    │ $x_i$ │" in row for row in session.screen()), session.screen()
+            session.send(b"q")
+            session.wait(0)
+        finally:
+            session.close()
+        session = image_session([document])
+        try:
+            until = time.monotonic() + 6
+            while not any(f.get(b"a") == b"p" for f, _ in commands(session)):
+                session.pump(.02)
+                assert time.monotonic() < until, session.visible()[-600:]
+            session.pump(.2)
+            (width, height), = [struct.unpack(">II", data[16:24]) for data in transferred(session)]
+            assert width % 10 == 0 and height == 40, (width, height)
+            screen = session.screen()
+            text_row = next(i for i, row in enumerate(screen) if "│ a" in row)
+            row = screen[text_row]
+            # TeXは表示せず、列幅は画像の列数（見出しの「式」の2セルより広ければその幅）になる。
+            assert "$" not in row, row
+            columns = max(2, width // 10)
+            assert row.rstrip() == " │ a    │ " + " " * columns + " │", row
+            # 画像の上の行にも罫線を残し、表の枠を途切れさせない。
+            assert screen[text_row - 1].rstrip() == " │      │ " + " " * columns + " │", screen[text_row - 1]
+            cursor = [m for m in re.finditer(rb"\x1b\[(\d+);(\d+)H\x1b_Ga=p", unwrapped(bytes(session.data)))]
+            # 余白1列＋「│ a    │ 」の9セルの次（1始まりで11列目）、本文の行の1つ上の行から置く。
+            assert {(int(m[1]), int(m[2])) for m in cursor} == {(text_row, 11)}, cursor
+            session.send(b"q")
+            session.wait(0)
+        finally:
+            session.close()
+
 def images_from_stdin_use_the_working_directory():
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
@@ -561,5 +604,6 @@ if __name__ == "__main__":
     case("ローカル画像・相対参照・色なしでも元の色・対象外の画像・シンボリックリンクの基準", local_images)
     case("標準入力の画像は作業ディレクトリが基準", images_from_stdin_use_the_working_directory)
     case("既定ではインライン数式を本文の行の中で画像にし、--inline-math textではTeXのまま", inline_math_images)
+    case("表のセルのインライン数式も画像にし、列幅を画像の幅で決める。--table-math textではTeXのまま", inline_math_in_tables)
     case("色の応答なしでも画像は表示・plainでは画像なし", images_without_colors_and_in_plain)
     case("再読込で書き換わった画像を読み直す", reload_reads_changed_images)

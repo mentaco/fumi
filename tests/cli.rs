@@ -29,6 +29,7 @@ fn syntax_errors_precede_tty_checks() {
         vec!["--graphics", "unknown", "a"],
         vec!["--color", "wrong", "a"],
         vec!["--inline-math", "wrong", "a"],
+        vec!["--table-math", "wrong", "a"],
         vec!["-", "a"],
     ] {
         let output = run(&args);

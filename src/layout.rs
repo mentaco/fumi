@@ -21,6 +21,8 @@ pub struct Run {
     pub destination: bool,
     /// インライン数式の要素全体（区切りを含む）。画像にするときは一つのセルにまとめる。
     pub math: bool,
+    /// 表の罫線と余白。数式の画像だけの行にも残す。
+    pub frame: bool,
 }
 
 #[derive(Default, Debug)]
@@ -132,6 +134,8 @@ struct Cell<'a> {
     offset: usize,
     /// 画像にしたインライン数式。セルの幅は画像の列数で、途中で折り返さない。
     formula: Option<(usize, InlineSize)>,
+    /// 表の罫線と余白。
+    frame: bool,
 }
 
 impl Cell<'_> {
@@ -148,6 +152,7 @@ fn run(text: impl Into<String>, style: Style, range: Range<usize>) -> Run {
         source: range,
         destination: false,
         math: false,
+        frame: false,
     }
 }
 
@@ -243,7 +248,14 @@ fn blank(lines: &mut Vec<LogicalLine>, source: usize) {
 }
 
 /// `images` は画像として表示する要素の範囲。最上位の段落・見出しでだけ使い、入れ子では空にする。
-fn sequence(nodes: &[Node], gaps: bool, width: usize, images: &[Range<usize>]) -> Vec<LogicalLine> {
+/// `formulas` は画像にしたインライン数式の大きさで、表の列幅の計算に使う。
+fn sequence(
+    nodes: &[Node],
+    gaps: bool,
+    width: usize,
+    images: &[Range<usize>],
+    formulas: &HashMap<usize, InlineSize>,
+) -> Vec<LogicalLine> {
     let mut lines = Vec::new();
     let mut i = 0;
     while i < nodes.len() {
@@ -252,7 +264,7 @@ fn sequence(nodes: &[Node], gaps: bool, width: usize, images: &[Range<usize>]) -
             blank(&mut lines, node.source.start);
         }
         if is_block(node) {
-            lines.extend(block(node, width, images));
+            lines.extend(block(node, width, images, formulas));
             i += 1;
         } else {
             let start = i;
@@ -306,6 +318,7 @@ fn split_images(runs: Vec<Run>, images: &[Range<usize>]) -> Vec<Run> {
                     source: at..at,
                     destination: false,
                     math: false,
+                    frame: false,
                 });
             }
         }
@@ -317,7 +330,12 @@ fn split_images(runs: Vec<Run>, images: &[Range<usize>]) -> Vec<Run> {
     result
 }
 
-fn block(node: &Node, width: usize, images: &[Range<usize>]) -> Vec<LogicalLine> {
+fn block(
+    node: &Node,
+    width: usize,
+    images: &[Range<usize>],
+    formulas: &HashMap<usize, InlineSize>,
+) -> Vec<LogicalLine> {
     let base = || LogicalLine::new(node.source.start, Vec::new());
     match &node.kind {
         Kind::Rule => vec![LogicalLine {
@@ -353,7 +371,7 @@ fn block(node: &Node, width: usize, images: &[Range<usize>]) -> Vec<LogicalLine>
             }]
         }
         Kind::Element(Tag::BlockQuote(_)) => {
-            let mut lines = sequence(&node.children, true, width.saturating_sub(2), &[]);
+            let mut lines = sequence(&node.children, true, width.saturating_sub(2), &[], formulas);
             for line in &mut lines {
                 line.prefix.insert_str(0, "│ ");
                 line.continuation.insert_str(0, "│ ");
@@ -380,6 +398,7 @@ fn block(node: &Node, width: usize, images: &[Range<usize>]) -> Vec<LogicalLine>
                     loose,
                     width.saturating_sub(marker.width()),
                     &[],
+                    formulas,
                 );
                 if contents.is_empty() {
                     contents.push(LogicalLine::new(item.source.start, Vec::new()));
@@ -439,9 +458,9 @@ fn block(node: &Node, width: usize, images: &[Range<usize>]) -> Vec<LogicalLine>
             })
             .collect(),
         Kind::Element(Tag::Table(alignments)) => {
-            grid_table(node, alignments, width).unwrap_or_else(|| table(node))
+            grid_table(node, alignments, width, formulas).unwrap_or_else(|| table(node))
         }
-        _ => sequence(&node.children, true, width.saturating_sub(2), &[]),
+        _ => sequence(&node.children, true, width.saturating_sub(2), &[], formulas),
     }
 }
 
@@ -463,7 +482,34 @@ fn header_runs(cell: &Node, index: usize, label_source: Range<usize>) -> Vec<Run
     runs
 }
 
-fn grid_table(node: &Node, alignments: &[Alignment], width: usize) -> Option<Vec<LogicalLine>> {
+/// 表のセルの表示幅。画像にしたインライン数式は画像の列数で数える。改行・タブを含むセルは
+/// 表の1行に収まらないため `None`。
+fn cell_width(runs: &[Run], formulas: &HashMap<usize, InlineSize>) -> Option<usize> {
+    let mut text = String::new();
+    let mut columns = 0;
+    for r in runs {
+        match formulas.get(&r.source.start).filter(|_| r.math) {
+            Some(size) => columns += size.columns,
+            None => text.push_str(&sanitize(&r.text)),
+        }
+    }
+    (!text.contains(['\n', '\t'])).then(|| text.width() + columns)
+}
+
+/// 罫線と余白のrun。数式の画像だけの行にも同じ位置に残す。
+fn frame(text: String, source: usize) -> Run {
+    Run {
+        frame: true,
+        ..run(text, Style::default(), source..source)
+    }
+}
+
+fn grid_table(
+    node: &Node,
+    alignments: &[Alignment],
+    width: usize,
+    formulas: &HashMap<usize, InlineSize>,
+) -> Option<Vec<LogicalLine>> {
     let mut rows: Vec<Vec<Vec<Run>>> = Vec::new();
     let mut sources = Vec::new();
     for row in &node.children {
@@ -492,11 +538,7 @@ fn grid_table(node: &Node, alignments: &[Alignment], width: usize) -> Option<Vec
     let mut widths = vec![0; count];
     for row in &rows {
         for (i, cell) in row.iter().enumerate().take(count) {
-            let text: String = cell.iter().map(|r| sanitize(&r.text)).collect();
-            if text.contains('\n') || text.contains('\t') {
-                return None;
-            }
-            widths[i] = widths[i].max(text.width());
+            widths[i] = widths[i].max(cell_width(cell, formulas)?);
         }
     }
     let no_row = "(no row)";
@@ -532,22 +574,17 @@ fn grid_table(node: &Node, alignments: &[Alignment], width: usize) -> Option<Vec
     let mut result = vec![border("┌", "┬", "┐", node.source.start)];
     for (row_index, row) in rows.iter().enumerate() {
         let source = sources[row_index];
-        let mut runs = vec![run("│", Style::default(), source..source)];
+        let mut runs = vec![frame("│".into(), source)];
         for (i, cell) in row.iter().enumerate().take(count) {
-            let text: String = cell.iter().map(|r| sanitize(&r.text)).collect();
-            let extra = widths[i].saturating_sub(text.width());
+            let extra = widths[i].saturating_sub(cell_width(cell, formulas)?);
             let left = match alignments[i] {
                 Alignment::Right => extra,
                 Alignment::Center => extra / 2,
                 _ => 0,
             };
-            runs.push(run(" ".repeat(1 + left), Style::default(), source..source));
+            runs.push(frame(" ".repeat(1 + left), source));
             runs.extend(cell.clone());
-            runs.push(run(
-                format!("{}│", " ".repeat(1 + extra - left)),
-                Style::default(),
-                source..source,
-            ));
+            runs.push(frame(format!("{}│", " ".repeat(1 + extra - left)), source));
         }
         result.push(LogicalLine::new(source, runs));
         if row_index == 0 {
@@ -621,9 +658,11 @@ fn table(node: &Node) -> Vec<LogicalLine> {
             let cell = row.children.get(col);
             let range = cell.map_or(row.source.clone(), |c| c.source.clone());
             let mut runs = header.clone();
-            // 複製したラベルは現在のデータセルに対応させる。
+            // 複製したラベルは現在のデータセルに対応させる。同じ数式の画像は画面に一つしか
+            // 置けないため、行ごとに繰り返す見出しの数式はTeXで表示する。
             for r in &mut runs {
                 r.source = range.start..range.start;
+                r.math = false;
             }
             runs.push(run(": ", Style::default(), range.start..range.start));
             let before = runs.len();
@@ -745,6 +784,7 @@ fn cells<'a>(
                     destination: None,
                     offset,
                     formula: Some((current.run.source.start, size)),
+                    frame: false,
                 });
                 column += size.columns;
             }
@@ -774,6 +814,7 @@ fn cells<'a>(
                 destination: None,
                 offset,
                 formula: None,
+                frame: false,
             });
             column = 0;
             continue;
@@ -801,6 +842,7 @@ fn cells<'a>(
             destination,
             offset,
             formula: None,
+            frame: mappings[first].run.frame,
         });
     }
     result
@@ -832,7 +874,7 @@ pub fn layout_with_images(
     if width == 0 {
         return Vec::new();
     }
-    let mut logical = sequence(&document.nodes, true, width, images);
+    let mut logical = sequence(&document.nodes, true, width, images, formulas);
     if logical.is_empty() {
         logical.push(LogicalLine::new(
             0,
@@ -927,11 +969,12 @@ fn wrap(
             .unwrap_or(source_start);
         push_with_formulas(
             display_line(
-                prefix,
+                prefix.clone(),
                 &data[start..end],
                 source_start..source_end.max(source_start),
                 code,
             ),
+            &prefix,
             &data[start..end],
             result,
         );
@@ -950,8 +993,31 @@ fn wrap(
 }
 
 /// 表示行を加える。行内の数式の画像が上下にはみ出す分は、画像だけの行を前後に加える。
-fn push_with_formulas(line: DisplayLine, cells: &[Cell], result: &mut Vec<DisplayLine>) {
+/// 表の行では、画像だけの行にも字下げと罫線を残す。
+fn push_with_formulas(
+    line: DisplayLine,
+    prefix: &str,
+    cells: &[Cell],
+    result: &mut Vec<DisplayLine>,
+) {
     let sizes: Vec<_> = cells.iter().filter_map(|c| c.formula).collect();
+    if sizes.is_empty() {
+        result.push(line);
+        return;
+    }
+    let frame = if cells.iter().any(|c| c.frame) {
+        let mut text = prefix.to_string();
+        for c in cells {
+            if c.frame {
+                text.push_str(&c.text);
+            } else {
+                text.push_str(&" ".repeat(c.width));
+            }
+        }
+        text
+    } else {
+        String::new()
+    };
     let up = sizes.iter().map(|(_, s)| s.above).max().unwrap_or(0);
     let down = sizes
         .iter()
@@ -975,7 +1041,7 @@ fn push_with_formulas(line: DisplayLine, cells: &[Cell], result: &mut Vec<Displa
             .collect();
         DisplayLine {
             formulas,
-            ..DisplayLine::new(Line::raw(""), line.source.clone(), Vec::new())
+            ..DisplayLine::new(Line::raw(frame.clone()), line.source.clone(), Vec::new())
         }
     };
     for offset in (1..=up).rev() {
@@ -1096,7 +1162,7 @@ fn display_line(
 /// 折返し・表形式によらない論理文字列とUTF-8ソース範囲。生成ラベルは除く。
 pub fn search_segments(document: &Document) -> Vec<Segment> {
     let mut result = Vec::new();
-    for line in sequence(&document.nodes, true, 0, &[]) {
+    for line in sequence(&document.nodes, true, 0, &[], &HashMap::new()) {
         let rendered: String = line
             .runs
             .iter()

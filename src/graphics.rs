@@ -781,7 +781,7 @@ mod tests {
     fn inline_formulas_are_placed_at_their_column_on_both_transports() {
         let source = "前 $x$ 後\n\nnext\n\nmore\n\nlast\n";
         let mut app = App::new(Document::parse(source.into()), "test.md", true);
-        app.set_inline_math(true);
+        app.set_inline_math(true, true);
         app.resize(40, 5);
         app.enable_graphics();
         let formula = source.find('$').unwrap();

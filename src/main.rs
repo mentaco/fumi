@@ -136,7 +136,9 @@ fn main() -> ExitCode {
     // `--plain`・`--graphics off` では画像化の対象にせず、端末の画像対応も確かめない。
     let inline_math =
         cli.inline_math == InlineMath::Image && !cli.plain && cli.graphics != GraphicsMode::Off;
-    app.set_inline_math(inline_math);
+    // 表のセルの数式は、インライン数式を画像にするときだけ `--table-math` で選ぶ。
+    let table_math = inline_math && cli.table_math == InlineMath::Image;
+    app.set_inline_math(inline_math, table_math);
     profile::mark("app_ms");
     // 相対参照の画像は、指定されたパス側の所在ディレクトリを基準にする。シンボリックリンクの
     // 実体側へ解決しない。標準入力では作業ディレクトリを基準にする（仕様2.4・8.3節）。
@@ -149,6 +151,7 @@ fn main() -> ExitCode {
         plain: cli.plain,
         colors,
         inline_math,
+        table_math,
         image_base,
     };
     let reloader = match read {

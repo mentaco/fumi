@@ -42,7 +42,7 @@ fn texts(lines: &[DisplayLine]) -> Vec<String> {
 /// インライン数式の画像化を有効にし、画像表示を始めた画面。
 fn viewer(source: &str, width: u16) -> App {
     let mut app = App::new(Document::parse(source.into()), "inline.md", false);
-    app.set_inline_math(true);
+    app.set_inline_math(true, true);
     app.resize(width, 12);
     app.enable_graphics();
     app
@@ -271,24 +271,145 @@ fn formulas_follow_list_indent_and_fall_back_when_wider_than_the_line() {
 }
 
 #[test]
-fn tables_code_and_disabled_option_keep_tex() {
+fn code_and_disabled_option_keep_tex() {
     let source = "| a |\n|---|\n| $x$ |\n\n`$y$`\n\n$z$\n";
     let document = Document::parse(source.into());
-    // 表のセルとコードの中は画像化の対象にしない。
+    // 表のセルの数式は画像化の対象にし、コードの中は対象にしない。
     let targets: Vec<_> = document
-        .inline_math()
+        .inline_math(true)
         .into_iter()
         .map(|(node, tex)| (node.source.start, tex))
         .collect();
-    assert_eq!(targets, [(source.rfind("$z$").unwrap(), "z")]);
+    let z = source.rfind("$z$").unwrap();
+    assert_eq!(targets, [(dollar(source, 0), "x"), (z, "z")]);
     // `--inline-math image` を指定しなければ、結果があってもTeXのまま。
     let mut app = App::new(document, "inline.md", false);
     app.resize(40, 12);
     app.enable_graphics();
-    let z = source.rfind("$z$").unwrap();
     app.set_images(HashMap::from([(z, image(1, 1, 0))]), Status::Pending);
     assert!(app.lines().iter().all(|line| line.formulas.is_empty()));
     assert!(texts(app.lines()).contains(&"$z$".to_string()));
+}
+
+#[test]
+fn table_columns_use_the_image_width_and_keep_borders_on_image_rows() {
+    let source = "| 名前 | 式 |\n|---|:-:|\n| a | $x$ |\n";
+    let mut app = viewer(source, 40);
+    // 生成前はTeXの幅で列幅を決める。
+    assert_eq!(texts(app.lines())[3], "│ a    │ $x$ │");
+    let x = dollar(source, 0);
+    app.set_images(HashMap::from([(x, image(5, 2, 1))]), Status::Pending);
+    let lines = app.lines();
+    // 列幅は画像の列数（5）で決め、見出しの中央揃えもその幅で計算する。画像の上の行にも
+    // 罫線を描き、表の枠が途切れないようにする。
+    assert_eq!(
+        texts(lines),
+        [
+            "┌──────┬───────┐",
+            "│ 名前 │  式   │",
+            "├──────┼───────┤",
+            "│      │       │",
+            "│ a    │       │",
+            "└──────┴───────┘",
+        ]
+    );
+    let placed = |line: &DisplayLine| -> Vec<_> {
+        line.formulas
+            .iter()
+            .map(|f| (f.source, f.row, f.column))
+            .collect()
+    };
+    assert_eq!(placed(&lines[3]), [(x, 0, 9)]);
+    assert_eq!(placed(&lines[4]), [(x, 1, 9)]);
+    assert_eq!(lines[3].source, lines[4].source);
+    // 画像の下の空白は数式のソースに対応し、検索の一致を下線で示せる。
+    let formula = &lines[4].formulas[0];
+    assert!(
+        lines[4]
+            .mappings
+            .iter()
+            .any(|m| m.text == formula.text && m.source == (x..x + "$x$".len()))
+    );
+}
+
+#[test]
+fn table_math_option_keeps_table_cells_as_tex() {
+    let source = "前 $y$ 後\n\n| 式 |\n|---|\n| $x$ |\n";
+    let (y, x) = (dollar(source, 0), dollar(source, 2));
+    // `--table-math text` では表のセルの数式を対象にしない。表の外の数式は対象のまま。
+    let document = Document::parse(source.into());
+    let starts = |tables| -> Vec<_> {
+        document
+            .inline_math(tables)
+            .into_iter()
+            .map(|(node, _)| node.source.start)
+            .collect()
+    };
+    assert_eq!(starts(true), [y, x]);
+    assert_eq!(starts(false), [y]);
+    let mut app = App::new(Document::parse(source.into()), "inline.md", false);
+    app.set_inline_math(true, false);
+    app.resize(40, 12);
+    app.enable_graphics();
+    app.set_images(
+        HashMap::from([(y, image(1, 2, 1)), (x, image(5, 2, 1))]),
+        Status::Pending,
+    );
+    let lines = app.lines();
+    assert!(texts(lines).contains(&"前   後".to_string()));
+    // 結果があっても表のセルはTeXのまま、列幅もTeXの幅で決める。
+    assert!(
+        texts(lines).contains(&"│ $x$ │".to_string()),
+        "{:?}",
+        texts(lines)
+    );
+    assert!(
+        lines
+            .iter()
+            .flat_map(|l| &l.formulas)
+            .all(|f| f.source == y)
+    );
+    // 表の数式しかない文書では、端末の画像対応を確かめない。
+    let mut only_table = App::new(Document::parse("| $x$ |\n|---|\n".into()), "t.md", false);
+    only_table.set_inline_math(true, false);
+    assert!(!only_table.has_graphics_targets());
+    only_table.set_inline_math(true, true);
+    assert!(only_table.has_graphics_targets());
+    // インライン数式を画像にしないときは、表の指定によらず対象にしない。
+    only_table.set_inline_math(false, true);
+    assert!(!only_table.has_graphics_targets());
+}
+
+#[test]
+fn wide_formula_images_switch_the_table_to_the_vertical_form() {
+    let source = "| $a$ | b |\n|---|---|\n| $x$ | 1 |\n";
+    // 本文幅20（40未満の端末は左右の余白なし）。画像の列数を含めた表の幅
+    // （14 + 1 + 罫線・余白7 = 22）が収まらない。
+    let mut app = viewer(source, 20);
+    let (a, x) = (dollar(source, 0), dollar(source, 2));
+    app.set_images(
+        HashMap::from([(a, image(1, 2, 1)), (x, image(14, 2, 1))]),
+        Status::Pending,
+    );
+    let lines = app.lines();
+    // 行ごとに繰り返す見出しの数式は、同じ画像を画面に一つしか置けないためTeXのまま。
+    assert_eq!(
+        texts(lines),
+        [
+            "[row 1]".to_string(),
+            String::new(),
+            format!("$a$: {}", " ".repeat(14)),
+            "b: 1".to_string(),
+        ]
+    );
+    assert_eq!(
+        lines[2]
+            .formulas
+            .iter()
+            .map(|f| (f.source, f.row, f.column))
+            .collect::<Vec<_>>(),
+        [(x, 1, 5)]
+    );
 }
 
 #[test]

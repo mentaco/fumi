@@ -52,6 +52,9 @@ pub struct Cli {
     /// インライン数式の表示方法（imageは数式画像を表示できる端末だけ）
     #[arg(long, value_enum, default_value = "image")]
     pub inline_math: InlineMath,
+    /// 表のセルのインライン数式の表示方法（--inline-math text では常にtext）
+    #[arg(long, value_enum, default_value = "image")]
+    pub table_math: InlineMath,
     /// ファイルの変更を監視して自動で再読込する（ファイル入力のみ）
     #[arg(long)]
     pub watch: bool,

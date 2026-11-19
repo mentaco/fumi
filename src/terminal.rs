@@ -220,6 +220,8 @@ pub struct GraphicsOptions {
     pub colors: bool,
     /// インライン数式も画像にするか（`--inline-math image`）。
     pub inline_math: bool,
+    /// 表のセルのインライン数式も画像にするか（`--table-math image`）。
+    pub table_math: bool,
     /// 相対参照の画像の基準ディレクトリ。ファイル入力ならその所在、標準入力なら作業ディレクトリ。
     pub image_base: std::path::PathBuf,
 }
@@ -419,6 +421,7 @@ fn configure_graphics(
                 app.document(),
                 &options.image_base,
                 options.inline_math,
+                options.table_math,
                 app.generation(),
                 capabilities,
             )))

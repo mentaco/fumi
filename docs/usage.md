@@ -12,6 +12,7 @@ fumi [OPTIONS] -               # 標準入力から読む
       --color <MODE>          auto / always / never（既定: auto）
       --graphics <MODE>       auto / off / kitty（既定: auto）
       --inline-math <MODE>    image / text（既定: image）
+      --table-math <MODE>     表のセルの数式: image / text（既定: image）
       --watch                 ファイルの変更を監視して自動で再読込（ファイル入力のみ）
   -h, --help                  使い方を表示して終了
   -V, --version               バージョンを表示して終了

@@ -285,6 +285,8 @@ pub struct Manager {
     base: PathBuf,
     /// インライン数式も画像にするか（`--inline-math image`）。
     inline_math: bool,
+    /// 表のセルのインライン数式も画像にするか（`--table-math image`）。
+    table_math: bool,
     /// 画像にする要素のソース範囲。文書の順に並ぶ。
     targets: Vec<(Range<usize>, Target)>,
     /// 各要素の現在の本文幅での生成要求。生成できなければその理由。
@@ -301,6 +303,7 @@ impl Manager {
         document: &Document,
         base: &Path,
         inline_math: bool,
+        table_math: bool,
         generation: u64,
         capabilities: Capabilities,
     ) -> Self {
@@ -308,6 +311,7 @@ impl Manager {
             generation,
             base: base.into(),
             inline_math,
+            table_math,
             targets: Vec::new(),
             keys: Vec::new(),
             width: None,
@@ -329,7 +333,7 @@ impl Manager {
         if self.inline_math {
             targets.extend(
                 document
-                    .inline_math()
+                    .inline_math(self.table_math)
                     .into_iter()
                     .map(|(node, tex)| (node.source.clone(), Target::Math(tex.into(), true))),
             );
@@ -555,7 +559,7 @@ mod tests {
     #[test]
     fn cache_evicts_oldest_images_under_the_shared_budget() {
         let document = Document::parse(String::new());
-        let mut manager = Manager::new(&document, Path::new("."), false, 0, capabilities());
+        let mut manager = Manager::new(&document, Path::new("."), false, false, 0, capabilities());
         for i in 0..3 {
             let key = math_key(&manager, &format!("x_{i}"), 78);
             manager.cache.insert(
@@ -591,6 +595,7 @@ mod tests {
             app.document(),
             Path::new("."),
             false,
+            false,
             app.generation(),
             capabilities(),
         );
@@ -617,6 +622,7 @@ mod tests {
         let mut manager = Manager::new(
             app.document(),
             Path::new("."),
+            false,
             false,
             app.generation(),
             capabilities(),
@@ -664,6 +670,7 @@ mod tests {
             app.document(),
             Path::new("."),
             false,
+            false,
             app.generation(),
             capabilities(),
         );
@@ -706,6 +713,7 @@ mod tests {
             app.document(),
             directory.path(),
             false,
+            false,
             app.generation(),
             capabilities,
         );
@@ -740,7 +748,7 @@ mod tests {
         let document = Document::parse("![a](a.png)\n".into());
         let mut capabilities = capabilities();
         capabilities.transport = Transport::Tmux;
-        let mut manager = Manager::new(&document, Path::new("docs"), false, 0, capabilities);
+        let mut manager = Manager::new(&document, Path::new("docs"), false, false, 0, capabilities);
         manager.set_width(400);
         let Ok(Key::Picture(request)) = &manager.keys[0] else {
             panic!("画像の要求がない");

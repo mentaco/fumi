@@ -251,10 +251,10 @@ impl Document {
         self.display_math().next().is_some()
     }
 
-    /// 画像にできるインライン数式の要素と、`$` 区切りを除いたTeX（仕様7.4節）。
-    /// 表のセルは文字数で列幅を決めるため対象外とし、TeX表示を続ける。
-    pub fn inline_math(&self) -> Vec<(&Node, &str)> {
-        fn visit<'a>(nodes: &'a [Node], out: &mut Vec<(&'a Node, &'a str)>) {
+    /// 画像にできるインライン数式の要素と、`$` 区切りを除いたTeX（仕様7.4節）。表のセルの
+    /// 数式は `tables` が真のときだけ含める（`--table-math`）。
+    pub fn inline_math(&self, tables: bool) -> Vec<(&Node, &str)> {
+        fn visit<'a>(nodes: &'a [Node], tables: bool, out: &mut Vec<(&'a Node, &'a str)>) {
             for node in nodes {
                 match &node.kind {
                     Kind::Math {
@@ -266,13 +266,13 @@ impl Document {
                             out.push((node, tex));
                         }
                     }
-                    Kind::Element(Tag::Table(_)) => {}
-                    _ => visit(&node.children, out),
+                    Kind::Element(Tag::Table(_)) if !tables => {}
+                    _ => visit(&node.children, tables, out),
                 }
             }
         }
         let mut found = Vec::new();
-        visit(&self.nodes, &mut found);
+        visit(&self.nodes, tables, &mut found);
         found
     }
 

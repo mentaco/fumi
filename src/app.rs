@@ -35,7 +35,7 @@ const WHEEL_LINES: usize = 3;
 /// ヘルプの本文。操作の数値は定数から埋め込み、実装との食い違いを防ぐ。
 fn help_text() -> String {
     format!(
-        "# fumi 操作一覧\n\n読み取り専用Markdownビューア（v1）\n\nj / ↓ : 1表示行下\nk / ↑ : 1表示行上\nCtrl+d / Ctrl+u : 半画面下 / 上\nCtrl+f / PageDown : 1画面下（1行重複）\nCtrl+b / PageUp : 1画面上（1行重複）\ngg / Home : 先頭\nG / End : 末尾\n? : ヘルプを開閉\nR : 文書を再読込（ファイル入力のみ）\nq : ツールを終了（ヘルプ表示中も同じ）\nEsc : 検索語・ハイライトを解除、ヘルプから本文へ戻る\n/ : 検索入力（最大{SEARCH_LIMIT}書記素）\nn / N : 次 / 前の一致（循環）\nホイール : {WHEEL_LINES}表示行上下\n検索中 Enter : 確定、Esc / Ctrl+c : 取消\n検索中 Backspace : 1書記素削除、Ctrl+u : 全消去\nCtrl+c : 割り込み終了（130）\nCtrl+z : 中断、fgで復帰\n\nヘルプでも移動できます。本文位置は変わりません。\nサイズ不足中はq / Ctrl+cで終了できます。\n\nfumi - : パイプ・リダイレクトの標準入力を表示\n--plain : 端末の画像対応の確認や画像を使わないテキストTUI\n--color auto|always|never : 色の指定\n--graphics auto|off|kitty : 数式画像の方式\n--inline-math image|text : インライン数式の表示（既定imageは対応端末で画像）\n--watch : ファイルの変更を監視して自動で再読込\n\n対応端末のブロック数式は画像、それ以外はTeXソースを表示します。\nインライン数式も同じ端末で画像にします（--inline-math textでTeXのまま）。\n対応端末では、最上位の段落・見出しにあるローカルのPNG/JPEG画像を表示します。\nそれ以外のMarkdown画像は代替テキストと参照先を表示します。\nリンクを開く操作はありません。"
+        "# fumi 操作一覧\n\n読み取り専用Markdownビューア（v1）\n\nj / ↓ : 1表示行下\nk / ↑ : 1表示行上\nCtrl+d / Ctrl+u : 半画面下 / 上\nCtrl+f / PageDown : 1画面下（1行重複）\nCtrl+b / PageUp : 1画面上（1行重複）\ngg / Home : 先頭\nG / End : 末尾\n? : ヘルプを開閉\nR : 文書を再読込（ファイル入力のみ）\nq : ツールを終了（ヘルプ表示中も同じ）\nEsc : 検索語・ハイライトを解除、ヘルプから本文へ戻る\n/ : 検索入力（最大{SEARCH_LIMIT}書記素）\nn / N : 次 / 前の一致（循環）\nホイール : {WHEEL_LINES}表示行上下\n検索中 Enter : 確定、Esc / Ctrl+c : 取消\n検索中 Backspace : 1書記素削除、Ctrl+u : 全消去\nCtrl+c : 割り込み終了（130）\nCtrl+z : 中断、fgで復帰\n\nヘルプでも移動できます。本文位置は変わりません。\nサイズ不足中はq / Ctrl+cで終了できます。\n\nfumi - : パイプ・リダイレクトの標準入力を表示\n--plain : 端末の画像対応の確認や画像を使わないテキストTUI\n--color auto|always|never : 色の指定\n--graphics auto|off|kitty : 数式画像の方式\n--inline-math image|text : インライン数式の表示（既定imageは対応端末で画像）\n--table-math image|text : 表のセルの数式の表示（既定image）\n--watch : ファイルの変更を監視して自動で再読込\n\n対応端末のブロック数式は画像、それ以外はTeXソースを表示します。\nインライン数式も同じ端末で画像にします（--inline-math textでTeXのまま）。\n対応端末では、最上位の段落・見出しにあるローカルのPNG/JPEG画像を表示します。\nそれ以外のMarkdown画像は代替テキストと参照先を表示します。\nリンクを開く操作はありません。"
     )
 }
 
@@ -130,6 +130,8 @@ pub struct App {
     graphics_active: bool,
     /// インライン数式も画像にするか（`--inline-math image`、仕様7.4節）。
     inline_math: bool,
+    /// 表のセルのインライン数式も画像にするか（`--table-math image`）。
+    table_math: bool,
     warning: String,
     /// 次のキー操作まで表示するお知らせ。再読込の結果等。
     notice: String,
@@ -154,6 +156,7 @@ impl App {
             graphics_status: Default::default(),
             graphics_active: false,
             inline_math: false,
+            table_math: false,
             warning: String::new(),
             notice: String::new(),
             help_visible: false,
@@ -174,9 +177,11 @@ impl App {
         !waiting.is_empty() && self.body.document.highlights.advanced(&waiting)
     }
 
-    /// インライン数式も画像にするかを設定する。画像表示の開始前に呼ぶ。
-    pub fn set_inline_math(&mut self, enabled: bool) {
+    /// インライン数式も画像にするか、そのうち表のセルの数式も画像にするかを設定する。
+    /// 画像表示の開始前に呼ぶ。`tables` は `enabled` が真のときだけ意味を持つ。
+    pub fn set_inline_math(&mut self, enabled: bool, tables: bool) {
         self.inline_math = enabled;
+        self.table_math = enabled && tables;
     }
 
     /// 本文の文書。
@@ -319,7 +324,7 @@ impl App {
         }
         self.body
             .document
-            .inline_math()
+            .inline_math(self.table_math)
             .into_iter()
             .filter_map(|(node, _)| match self.doc.views.get(&node.source.start) {
                 Some(View::Ready(image)) => Some((
@@ -339,7 +344,7 @@ impl App {
     pub fn has_graphics_targets(&self) -> bool {
         self.body.document.has_display_math()
             || !self.body.document.local_images().is_empty()
-            || (self.inline_math && !self.body.document.inline_math().is_empty())
+            || (self.inline_math && !self.body.document.inline_math(self.table_math).is_empty())
     }
 
     /// 本文の文書を差し替える（仕様3.1節）。文書の内容から作った状態を捨てて世代を進め、
