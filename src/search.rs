@@ -134,9 +134,9 @@ impl Search {
                 .matches
                 .partition_point(|m| m.start() < source.start)
                 .saturating_sub(1);
-            for i in start..end {
-                if self.matches[i].contains(source) {
-                    mark(i);
+            for (i, matched) in self.matches[start..end].iter().enumerate() {
+                if matched.contains(source) {
+                    mark(start + i);
                 }
             }
         }
