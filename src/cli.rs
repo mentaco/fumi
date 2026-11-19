@@ -13,9 +13,9 @@ pub enum GraphicsMode {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
 pub enum InlineMath {
     /// TeXソースを表示する。
-    #[default]
     Text,
     /// 数式画像を表示できる端末では画像にする。
+    #[default]
     Image,
 }
 
@@ -50,7 +50,7 @@ pub struct Cli {
     #[arg(long, value_enum, default_value = "auto")]
     pub graphics: GraphicsMode,
     /// インライン数式の表示方法（imageは数式画像を表示できる端末だけ）
-    #[arg(long, value_enum, default_value = "text")]
+    #[arg(long, value_enum, default_value = "image")]
     pub inline_math: InlineMath,
     /// ファイルの変更を監視して自動で再読込する（ファイル入力のみ）
     #[arg(long)]

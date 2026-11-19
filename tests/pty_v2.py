@@ -356,13 +356,13 @@ def local_images():
 
 
 def inline_math_images():
-    """`--inline-math image` のときだけインライン数式を画像にし、本文の行の中へ置く（仕様7.4節）。"""
+    """既定（`--inline-math image`）ではインライン数式を画像にし、本文の行の中へ置く（仕様7.4節）。"""
     with tempfile.TemporaryDirectory() as directory:
         document = Path(directory) / "inline.md"
         document.write_text("前の文 $x_i$ と $\\frac{a}{b}$ 後の文\n", encoding="utf-8")
         before = document.read_bytes()
-        # 既定（text）と plain では、インライン数式だけの文書で端末の画像対応を確かめない。
-        for args in [[document], ["--plain", "--inline-math", "image", document]]:
+        # text と plain では、インライン数式だけの文書で端末の画像対応を確かめない。
+        for args in [["--inline-math", "text", document], ["--plain", document]]:
             session = Session(args)
             try:
                 session.pump(1.0)
@@ -372,7 +372,7 @@ def inline_math_images():
                 session.wait(0)
             finally:
                 session.close()
-        session = image_session(["--inline-math", "image", document])
+        session = image_session([document])
         try:
             until = time.monotonic() + 6
             while sum(f.get(b"a") == b"p" for f, _ in commands(session)) < 2:
@@ -560,6 +560,6 @@ if __name__ == "__main__":
     case("--watchの自動再読込・変化なし・削除と復旧", watch_reload)
     case("ローカル画像・相対参照・色なしでも元の色・対象外の画像・シンボリックリンクの基準", local_images)
     case("標準入力の画像は作業ディレクトリが基準", images_from_stdin_use_the_working_directory)
-    case("--inline-math imageのときだけインライン数式を本文の行の中で画像にする", inline_math_images)
+    case("既定ではインライン数式を本文の行の中で画像にし、--inline-math textではTeXのまま", inline_math_images)
     case("色の応答なしでも画像は表示・plainでは画像なし", images_without_colors_and_in_plain)
     case("再読込で書き換わった画像を読み直す", reload_reads_changed_images)
