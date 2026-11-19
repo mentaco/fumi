@@ -655,3 +655,13 @@ Linux、遅いCPUでの結果。macOSのGhostty・Rex以外の端末。計算中
 - `tests/v2_inline_math.rs`：`text`で表のセルだけTeXのまま列幅もTeXの幅になること、表の外の数式は画像になること、表の数式しかない文書では画像対応を確かめないことを加えた。`tests/cli.rs`：不正値が使用法エラー（2）になること。`tests/pty_v2.py`：`--table-math text`では照会を送らず表のセルにTeXを表示することを加えた。
 - 手元（macOS 27.2.1、Apple M3、Rust 1.92.0）でfmt・Clippy成功、Rustテスト106件成功（1件ignore）。PTY検証62グループ（smoke 14、v1 25、v2 17、実tmux 3.8で6）が成功した。
 - 実端末での確認は未実施。
+
+### 表のセルの数式の変更のリモートCI（2026-11-19）
+
+`81fb26c`（実装）と`ba9fe64`（記録）をmainへプッシュし、GitHub Actionsの[実行44491819541](https://github.com/mentaco/fumi/actions/runs/44491819541)で4ジョブすべて成功した。
+
+- Rust 1.100.0（`test`）と1.88.0（`msrv`）の両OS（ubuntu-latest・macos-latest）でRustテスト106件が成功（1件ignore）した。
+- `test`の両OSでPTY検証62グループ（smoke 14、v1 25、tmux 6、v2 17）が成功した。追加した「表のセルのインライン数式も画像にし、列幅を画像の幅で決める。--table-math textではTeXのまま」も両OSで成功した。
+- Ubuntuの`tests/pty_v1.py`で「tmux仮想配置失敗のテキスト復帰」が1回再試行された（`RETRY 1/5 tmux自動設定タイムアウト`）。次の試行で成功した。表・インライン数式を含まない確認で、これまでの実行でも見られたtmuxの応答の遅れによるもの。
+- 所要時間は`test`がUbuntuで2分18秒、macOSで2分5秒。
+- 実端末での確認は未実施。
